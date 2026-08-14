@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import { runAgentProcess } from "./agent-runner.js";
+import { runAgentCheckoutInspection, runAgentProcess } from "./agent-runner.js";
 import { stringArg, type Args } from "./clawsweeper-args.js";
 import {
   mediaProofRuntimeHints,
@@ -734,6 +734,8 @@ ${extra}
       },
       overallCorrectness: "not a patch",
       overallConfidenceScore: 0,
+      localCheckoutAccess: "unverified",
+      checkoutInspectionFailed: /^Read-only checkout inspection failed\b/.test(failureDetail),
       codexTerminalFailure: Boolean(terminalError),
       fixedRelease: null,
       fixedSha: null,
@@ -958,12 +960,34 @@ ${extra}
         `OpenClaw checkout is dirty before reviewing #${options.item.number}:\n${dirtyBefore}`,
       );
     }
+    const codexEnv = untrustedCodexEnv({
+      ghToken: process.env.CLAWSWEEPER_PROOF_INSPECTION_TOKEN,
+      preserveCodexAuth: options.preserveCodexAuth,
+    });
+    const startedAt = Date.now();
+    const checkoutInspection = runAgentCheckoutInspection({
+      cwd: options.openclawDir,
+      env: codexEnv,
+      timeoutMs: Math.min(options.timeoutMs, 30_000),
+    });
+    if (checkoutInspection.error || checkoutInspection.status !== 0) {
+      const stderr = redactedOutputTail(checkoutInspection.stderr);
+      const stdout = redactedOutputTail(checkoutInspection.stdout);
+      throw new CodexReviewError({
+        message: `Read-only checkout inspection failed for #${options.item.number}: ${stderr || stdout || checkoutInspection.error?.message || "unknown sandbox failure"}`,
+        status: checkoutInspection.status,
+        stdout,
+        stderr,
+        errorCode: codexProcessErrorCode(checkoutInspection.error),
+        signal: checkoutInspection.signal,
+        retryable: true,
+      });
+    }
     const configuredAttempts = Number(process.env.CLAWSWEEPER_CODEX_REVIEW_ATTEMPTS ?? 3);
     const maxAttempts = Math.min(
       5,
       Math.max(1, Number.isFinite(configuredAttempts) ? Math.floor(configuredAttempts) : 3),
     );
-    const startedAt = Date.now();
     const runReviewPass = (reasoningEffort: string, passAttempts: number): Decision => {
       const codexConfig = ['approval_policy="never"'];
       if (options.forcedLoginMethod) {
@@ -1004,13 +1028,7 @@ ${extra}
             "-",
           ],
           cwd: options.openclawDir,
-          env: {
-            ...untrustedCodexEnv({
-              ghToken: process.env.CLAWSWEEPER_PROOF_INSPECTION_TOKEN,
-              preserveCodexAuth: options.preserveCodexAuth,
-            }),
-            CLAWSWEEPER_PROOF_SCRATCH_DIR: proofScratchDir,
-          },
+          env: { ...codexEnv, CLAWSWEEPER_PROOF_SCRATCH_DIR: proofScratchDir },
           stderrPath: join(options.workDir, `${options.item.number}.${attempt}.codex.stderr.log`),
           stdoutPath: join(options.workDir, `${options.item.number}.${attempt}.codex.stdout.log`),
           timeoutMs: remainingMs,
@@ -1044,7 +1062,7 @@ ${extra}
                 );
               }
             }
-            return decision;
+            return { ...decision, localCheckoutAccess: "verified" };
           } catch (error) {
             failureDetail = `Codex review failed for #${options.item.number} with exit ${
               result.status ?? "unknown"

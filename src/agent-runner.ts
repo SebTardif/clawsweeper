@@ -1,3 +1,5 @@
+import { randomInt } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { codexModelArgs, redactInternalCodexModel } from "./codex-env.js";
 import {
@@ -72,6 +74,123 @@ export function runAgentProcess(options: RunAgentProcessOptions): CodexProcessRe
   const note =
     "[clawsweeper] CLAWSWEEPER_STEERABLE_CODEX is Codex-specific; OpenClaw used a plain run.";
   return { ...result, stderr: [result.stderr.trimEnd(), note].filter(Boolean).join("\n") };
+}
+
+export function runAgentCheckoutInspection(options: {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+}): CodexProcessResult {
+  const env = { ...options.env, GIT_OPTIONAL_LOCKS: "0" };
+  const trackedFiles = spawnSync("git", ["ls-files", "-z"], {
+    cwd: options.cwd,
+    encoding: "utf8",
+    env,
+    timeout: options.timeoutMs,
+  });
+  if (trackedFiles.error || trackedFiles.status !== 0) return spawnResult(trackedFiles);
+  const candidates = (trackedFiles.stdout ?? "")
+    .split("\0")
+    .filter((path) => /^[A-Za-z0-9._/-]+$/.test(path));
+  const start = candidates.length > 0 ? randomInt(candidates.length) : 0;
+  const orderedCandidates = [...candidates.slice(start), ...candidates.slice(0, start)];
+  let fingerprintPath = "";
+  let fingerprint = "";
+  for (const candidate of orderedCandidates) {
+    const hashed = spawnSync("git", ["hash-object", "--", candidate], {
+      cwd: options.cwd,
+      encoding: "utf8",
+      env,
+      timeout: options.timeoutMs,
+    });
+    const value = (hashed.stdout ?? "").trim();
+    if (!hashed.error && hashed.status === 0 && /^[0-9a-f]{40,64}$/.test(value)) {
+      fingerprintPath = candidate;
+      fingerprint = value;
+      break;
+    }
+  }
+  if (!fingerprintPath) {
+    return {
+      status: 1,
+      signal: null,
+      error: new Error("Checkout inspection could not select a tracked file."),
+      stdout: "",
+      stderr: "",
+    };
+  }
+  if (agentRunner(env) === "codex") {
+    return verifyCheckoutChallenge(
+      runCodexProcess({
+        args: [
+          "sandbox",
+          "--permission-profile",
+          ":read-only",
+          "-C",
+          options.cwd,
+          "--",
+          "git",
+          "hash-object",
+          "--",
+          fingerprintPath,
+        ],
+        cwd: options.cwd,
+        env,
+        input: "",
+        timeoutMs: options.timeoutMs,
+      }),
+      fingerprint,
+      "Codex",
+    );
+  }
+  const model = openclawModel(env);
+  const result = redactOpenclawFailure(
+    runOpenclawProcess({
+      label: "checkout-inspection",
+      prompt: [
+        "Use the exec tool to run this command in the workspace:",
+        `git status --porcelain=v1 --untracked-files=no && git hash-object -- ${fingerprintPath}`,
+        "Return only the command stdout, with no explanation or formatting.",
+      ].join("\n"),
+      model,
+      cwd: options.cwd,
+      env,
+      timeoutMs: options.timeoutMs,
+    }),
+    model,
+  );
+  return verifyCheckoutChallenge(result, fingerprint, "OpenClaw");
+}
+
+function verifyCheckoutChallenge(
+  result: CodexProcessResult,
+  fingerprint: string,
+  runner: "Codex" | "OpenClaw",
+): CodexProcessResult {
+  if (result.error || result.status !== 0) return result;
+  if (result.stdout.trim() !== fingerprint) {
+    return {
+      status: 1,
+      signal: result.signal,
+      error: new Error(`${runner} checkout inspection did not return the runner challenge.`),
+      stdout: "",
+      stderr: result.stderr,
+    };
+  }
+  return {
+    ...result,
+    stdout: "",
+  };
+}
+
+function spawnResult(result: ReturnType<typeof spawnSync>): CodexProcessResult {
+  return {
+    status: result.status,
+    signal: result.signal,
+    ...(result.error ? { error: result.error } : {}),
+    stdout: typeof result.stdout === "string" ? result.stdout : "",
+    stderr: typeof result.stderr === "string" ? result.stderr : "",
+  };
 }
 
 function redactOpenclawFailure(result: CodexProcessResult, model: string): CodexProcessResult {

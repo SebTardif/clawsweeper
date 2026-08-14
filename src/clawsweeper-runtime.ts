@@ -455,6 +455,7 @@ const recordMetadata = createRecordMetadata({
 });
 export const {
   applyDecisionPriority,
+  effectiveReviewStatus: effectiveReviewStatusForTest,
   exactEventReviewLeaseDispositionForTest,
   failedReviewRetryEligibilityForTest,
   isInfrastructureFailedReviewForTest,

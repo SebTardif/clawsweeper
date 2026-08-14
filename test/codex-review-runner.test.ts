@@ -20,6 +20,24 @@ import {
 } from "../dist/clawsweeper.js";
 import { closeDecision, item, tmpPrefix } from "./helpers.ts";
 
+const trackedCheckoutContent = "tracked checkout content\n";
+const trackedCheckoutFingerprint = "8b9382c9009cdc46cb69d59eb0078522d45023b2";
+const fakeCodexSandboxPass = `if (process.argv[2] === "sandbox") {
+  process.stdout.write(${JSON.stringify(trackedCheckoutFingerprint)} + "\\n");
+  process.exit(0);
+}`;
+
+function initTrackedRepo(dir: string): void {
+  execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
+  writeFileSync(join(dir, "tracked.txt"), trackedCheckoutContent);
+  execFileSync("git", ["add", "tracked.txt"], { cwd: dir, stdio: "ignore" });
+  execFileSync(
+    "git",
+    ["-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+    { cwd: dir, stdio: "ignore" },
+  );
+}
+
 test("Codex decision schema avoids unsupported strict-output keywords recursively", () => {
   const schema = JSON.parse(
     readFileSync(join(process.cwd(), "schema", "clawsweeper-decision.schema.json"), "utf8"),
@@ -68,11 +86,12 @@ test("runCodex accepts valid structured output after non-zero Codex exit", () =>
   const binDir = join(root, "bin");
   mkdirSync(openclawDir, { recursive: true });
   mkdirSync(binDir, { recursive: true });
-  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  initTrackedRepo(openclawDir);
   const codexPath = join(binDir, "codex");
   writeFileSync(
     codexPath,
     `#!/usr/bin/env node
+${fakeCodexSandboxPass}
 const fs = require("node:fs");
 const outputIndex = process.argv.indexOf("--output-last-message");
 if (outputIndex === -1) process.exit(2);
@@ -113,11 +132,260 @@ process.exit(1);
 
     assert.equal(decision.decision, "keep_open");
     assert.equal(decision.summary, "Keep open for maintainer follow-up.");
+    assert.equal(decision.localCheckoutAccess, "verified");
   } finally {
     if (originalPath === undefined) delete process.env.PATH;
     else process.env.PATH = originalPath;
     if (originalDecision === undefined) delete process.env.CODEX_DECISION_JSON;
     else process.env.CODEX_DECISION_JSON = originalDecision;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runCodex stops before model review when the sandbox cannot prove the tracked file", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const openclawDir = join(root, "openclaw");
+  const workDir = join(root, "codex-work");
+  const binDir = join(root, "bin");
+  const invocationsPath = join(root, "codex-invocations");
+  mkdirSync(openclawDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  initTrackedRepo(openclawDir);
+  const codexPath = join(binDir, "codex");
+  writeFileSync(
+    codexPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(process.env.CODEX_INVOCATIONS_PATH, JSON.stringify(process.argv.slice(2)) + "\\n");
+if (process.argv[2] === "sandbox") {
+  process.stdout.write("0000000000000000000000000000000000000000\\n");
+  process.exit(0);
+}
+process.exit(0);
+`,
+  );
+  chmodSync(codexPath, 0o755);
+  const previous = {
+    PATH: process.env.PATH,
+    CODEX_INVOCATIONS_PATH: process.env.CODEX_INVOCATIONS_PATH,
+  };
+  process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
+  process.env.CODEX_INVOCATIONS_PATH = invocationsPath;
+  try {
+    assert.throws(() =>
+      runCodexForTest({
+        item: item({ number: 83396 }),
+        context: { issue: {}, comments: [], timeline: [] },
+        git: { mainSha: "abc123", latestRelease: null },
+        model: "model-test",
+        openclawDir,
+        reasoningEffort: "high",
+        sandboxMode: "read-only",
+        serviceTier: "",
+        timeoutMs: 10_000,
+        workDir,
+        prompt: "Return a review decision.",
+      }),
+    );
+    assert.deepEqual(JSON.parse(readFileSync(invocationsPath, "utf8")), [
+      "sandbox",
+      "--permission-profile",
+      ":read-only",
+      "-C",
+      openclawDir,
+      "--",
+      "git",
+      "hash-object",
+      "--",
+      "tracked.txt",
+    ]);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runCodex counts checkout inspection against the review timeout", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const openclawDir = join(root, "openclaw");
+  const workDir = join(root, "codex-work");
+  const binDir = join(root, "bin");
+  mkdirSync(openclawDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  initTrackedRepo(openclawDir);
+  const codexPath = join(binDir, "codex");
+  writeFileSync(
+    codexPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+if (process.argv[2] === "sandbox") {
+  setTimeout(() => {
+    process.stdout.write(${JSON.stringify(trackedCheckoutFingerprint)} + "\\n");
+    process.exit(0);
+  }, 400);
+} else {
+  const outputIndex = process.argv.indexOf("--output-last-message");
+  setTimeout(() => {
+    fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON);
+  }, 400);
+}
+`,
+  );
+  chmodSync(codexPath, 0o755);
+  const previous = {
+    PATH: process.env.PATH,
+    CODEX_DECISION_JSON: process.env.CODEX_DECISION_JSON,
+    CLAWSWEEPER_CODEX_REVIEW_ATTEMPTS: process.env.CLAWSWEEPER_CODEX_REVIEW_ATTEMPTS,
+  };
+  process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
+  process.env.CODEX_DECISION_JSON = JSON.stringify(closeDecision({ decision: "keep_open" }));
+  process.env.CLAWSWEEPER_CODEX_REVIEW_ATTEMPTS = "1";
+  try {
+    assert.throws(() =>
+      runCodexForTest({
+        item: item({ number: 83399 }),
+        context: { issue: {}, comments: [], timeline: [] },
+        git: { mainSha: "abc123", latestRelease: null },
+        model: "model-test",
+        openclawDir,
+        reasoningEffort: "high",
+        sandboxMode: "read-only",
+        serviceTier: "",
+        timeoutMs: 650,
+        workDir,
+        prompt: "Return a review decision.",
+      }),
+    );
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runCodex verifies checkout access through the OpenClaw tool gateway", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const openclawDir = join(root, "openclaw");
+  const workDir = join(root, "review-work");
+  const openclawPath = join(root, "fake-openclaw");
+  const promptsPath = join(root, "openclaw-prompts");
+  mkdirSync(openclawDir, { recursive: true });
+  initTrackedRepo(openclawDir);
+  const expected = closeDecision({ decision: "keep_open", summary: "Reviewed with OpenClaw." });
+  writeFileSync(
+    openclawPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const childProcess = require("node:child_process");
+const prompt = fs.readFileSync(process.argv[process.argv.indexOf("--message-file") + 1], "utf8");
+fs.appendFileSync(process.env.OPENCLAW_TEST_PROMPTS_PATH, prompt + "\\n---\\n");
+const fingerprintMarker = "git hash-object -- ";
+const fingerprintLine = prompt.split("\\n").find((line) => line.includes(fingerprintMarker));
+const fingerprintPath = fingerprintLine?.slice(fingerprintLine.indexOf(fingerprintMarker) + fingerprintMarker.length).trim();
+const text = fingerprintPath
+  ? childProcess.execFileSync("git", ["hash-object", "--", fingerprintPath], { cwd: process.env.OPENCLAW_WORKSPACE_DIR, encoding: "utf8" }).trim()
+  : ${JSON.stringify(JSON.stringify(expected))};
+process.stdout.write(JSON.stringify({ payloads: [{ text }], meta: { stopReason: "stop" } }));
+`,
+  );
+  chmodSync(openclawPath, 0o755);
+  const previous = {
+    CLAWSWEEPER_RUNNER: process.env.CLAWSWEEPER_RUNNER,
+    CLAWSWEEPER_OPENCLAW_BIN: process.env.CLAWSWEEPER_OPENCLAW_BIN,
+    CLAWSWEEPER_OPENCLAW_MODEL: process.env.CLAWSWEEPER_OPENCLAW_MODEL,
+    CODEX_BIN: process.env.CODEX_BIN,
+    OPENCLAW_TEST_PROMPTS_PATH: process.env.OPENCLAW_TEST_PROMPTS_PATH,
+  };
+  process.env.CLAWSWEEPER_RUNNER = "openclaw";
+  process.env.CLAWSWEEPER_OPENCLAW_BIN = openclawPath;
+  process.env.CLAWSWEEPER_OPENCLAW_MODEL = "openai/gpt-5";
+  process.env.CODEX_BIN = join(root, "missing-codex");
+  process.env.OPENCLAW_TEST_PROMPTS_PATH = promptsPath;
+  try {
+    const decision = runCodexForTest({
+      item: item({ number: 83397 }),
+      context: { issue: {}, comments: [], timeline: [] },
+      git: { mainSha: "abc123", latestRelease: null },
+      model: "internal",
+      openclawDir,
+      reasoningEffort: "high",
+      sandboxMode: "read-only",
+      serviceTier: "",
+      timeoutMs: 10_000,
+      workDir,
+      prompt: "Return a review decision.",
+    });
+    assert.equal(decision.summary, "Reviewed with OpenClaw.");
+    assert.equal(decision.localCheckoutAccess, "verified");
+    const prompts = readFileSync(promptsPath, "utf8");
+    assert.match(
+      prompts,
+      /git status --porcelain=v1 --untracked-files=no[^\n]+git hash-object -- tracked\.txt/,
+    );
+    assert.match(prompts, /Return a review decision/);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runCodex stops before OpenClaw review when the tool gateway cannot prove checkout access", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const openclawDir = join(root, "openclaw");
+  const workDir = join(root, "review-work");
+  const openclawPath = join(root, "fake-openclaw");
+  const invocationsPath = join(root, "openclaw-invocations");
+  mkdirSync(openclawDir, { recursive: true });
+  initTrackedRepo(openclawDir);
+  writeFileSync(
+    openclawPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(process.env.OPENCLAW_TEST_INVOCATIONS_PATH, "invoked\\n");
+process.stdout.write(JSON.stringify({ payloads: [{ text: "tool unavailable" }], meta: { stopReason: "stop" } }));
+`,
+  );
+  chmodSync(openclawPath, 0o755);
+  const previous = {
+    CLAWSWEEPER_RUNNER: process.env.CLAWSWEEPER_RUNNER,
+    CLAWSWEEPER_OPENCLAW_BIN: process.env.CLAWSWEEPER_OPENCLAW_BIN,
+    CLAWSWEEPER_OPENCLAW_MODEL: process.env.CLAWSWEEPER_OPENCLAW_MODEL,
+    OPENCLAW_TEST_INVOCATIONS_PATH: process.env.OPENCLAW_TEST_INVOCATIONS_PATH,
+  };
+  process.env.CLAWSWEEPER_RUNNER = "openclaw";
+  process.env.CLAWSWEEPER_OPENCLAW_BIN = openclawPath;
+  process.env.CLAWSWEEPER_OPENCLAW_MODEL = "openai/gpt-5";
+  process.env.OPENCLAW_TEST_INVOCATIONS_PATH = invocationsPath;
+  try {
+    assert.throws(() =>
+      runCodexForTest({
+        item: item({ number: 83398 }),
+        context: { issue: {}, comments: [], timeline: [] },
+        git: { mainSha: "abc123", latestRelease: null },
+        model: "internal",
+        openclawDir,
+        reasoningEffort: "high",
+        sandboxMode: "read-only",
+        serviceTier: "",
+        timeoutMs: 10_000,
+        workDir,
+        prompt: "Return a review decision.",
+      }),
+    );
+    assert.equal(readFileSync(invocationsPath, "utf8"), "invoked\n");
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -130,11 +398,12 @@ test("runCodex honors env login config unless preserving local Codex auth", () =
   const argsPath = join(root, "codex-args.json");
   mkdirSync(openclawDir, { recursive: true });
   mkdirSync(binDir, { recursive: true });
-  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  initTrackedRepo(openclawDir);
   const codexPath = join(binDir, "codex");
   writeFileSync(
     codexPath,
     `#!/usr/bin/env node
+${fakeCodexSandboxPass}
 const fs = require("node:fs");
 fs.writeFileSync(process.env.CODEX_ARGS_PATH, JSON.stringify(process.argv.slice(2)));
 const outputIndex = process.argv.indexOf("--output-last-message");
@@ -229,11 +498,12 @@ test("runCodex preserves redacted process output when Codex exits without a deci
   const binDir = join(root, "bin");
   mkdirSync(openclawDir, { recursive: true });
   mkdirSync(binDir, { recursive: true });
-  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  initTrackedRepo(openclawDir);
   const codexPath = join(binDir, "codex");
   writeFileSync(
     codexPath,
     `#!/usr/bin/env node
+${fakeCodexSandboxPass}
 process.stdout.write("startup banner GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456 CODEX_ACCESS_TOKEN=codex-access-token-secret\\n");
 process.stderr.write("Rate limit reached for model-test on tokens per min (TPM); OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456 {\\"CODEX_ACCESS_TOKEN\\":\\"codex-json-token-secret\\"}\\n");
 process.exit(1);
@@ -296,11 +566,12 @@ test("runCodex accepts structured output after more than 128 MiB of process outp
   const binDir = join(root, "bin");
   mkdirSync(openclawDir, { recursive: true });
   mkdirSync(binDir, { recursive: true });
-  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  initTrackedRepo(openclawDir);
   const codexPath = join(binDir, "codex");
   writeFileSync(
     codexPath,
     `#!/usr/bin/env node
+${fakeCodexSandboxPass}
 const fs = require("node:fs");
 const chunk = Buffer.alloc(1024 * 1024, "x");
 for (let index = 0; index < 129; index += 1) fs.writeSync(1, chunk);
@@ -363,6 +634,7 @@ test("codex failure decisions expose stderr and stdout separately", () => {
     decision.summary,
     "Codex review failed: retryable codex transport failure (capacity) (exit 1).",
   );
+  assert.equal(decision.localCheckoutAccess, "unverified");
   assert.equal(
     decision.evidence.find((entry) => entry.label === "codex stderr")?.detail,
     "user\nThe reviewed prompt discusses rate limits.",
@@ -462,12 +734,13 @@ test("runCodex retries a transient failure in a fresh process", () => {
   mkdirSync(openclawDir, { recursive: true });
   mkdirSync(binDir, { recursive: true });
   mkdirSync(codexHome, { recursive: true });
-  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  initTrackedRepo(openclawDir);
   writeFileSync(join(codexHome, "config.toml"), 'model = "secret-model-for-test"\n');
   const codexPath = join(binDir, "codex");
   writeFileSync(
     codexPath,
     `#!/usr/bin/env node
+${fakeCodexSandboxPass}
 const fs = require("node:fs");
 const attemptsPath = process.env.CODEX_ATTEMPTS_PATH;
 const attempt = fs.existsSync(attemptsPath) ? Number(fs.readFileSync(attemptsPath, "utf8")) + 1 : 1;
@@ -546,11 +819,12 @@ test("runCodex keeps high reasoning for the final transport retry", () => {
   const attemptTimesPath = join(root, "attempt-times");
   mkdirSync(openclawDir, { recursive: true });
   mkdirSync(binDir, { recursive: true });
-  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  initTrackedRepo(openclawDir);
   const codexPath = join(binDir, "codex");
   writeFileSync(
     codexPath,
     `#!/usr/bin/env node
+${fakeCodexSandboxPass}
 const fs = require("node:fs");
 // Consume the prompt like the real Codex CLI so early exits cannot race its stdin writer.
 fs.readFileSync(0, "utf8");
@@ -642,11 +916,12 @@ test("runCodex keeps the transport classification when the final high retry also
   const attemptsPath = join(root, "attempts");
   mkdirSync(openclawDir, { recursive: true });
   mkdirSync(binDir, { recursive: true });
-  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  initTrackedRepo(openclawDir);
   const codexPath = join(binDir, "codex");
   writeFileSync(
     codexPath,
     `#!/usr/bin/env node
+${fakeCodexSandboxPass}
 const fs = require("node:fs");
 const attemptsPath = process.env.CODEX_ATTEMPTS_PATH;
 const n = fs.existsSync(attemptsPath) ? Number(fs.readFileSync(attemptsPath, "utf8")) + 1 : 1;
@@ -715,11 +990,12 @@ test("runCodex skips the final high retry when the time budget is too small", ()
   const attemptsPath = join(root, "attempts");
   mkdirSync(openclawDir, { recursive: true });
   mkdirSync(binDir, { recursive: true });
-  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  initTrackedRepo(openclawDir);
   const codexPath = join(binDir, "codex");
   writeFileSync(
     codexPath,
     `#!/usr/bin/env node
+${fakeCodexSandboxPass}
 const fs = require("node:fs");
 const attemptsPath = process.env.CODEX_ATTEMPTS_PATH;
 const n = fs.existsSync(attemptsPath) ? Number(fs.readFileSync(attemptsPath, "utf8")) + 1 : 1;
@@ -775,11 +1051,12 @@ test("runCodex does not retry terminal model access failures", () => {
   const attemptsPath = join(root, "attempts");
   mkdirSync(openclawDir, { recursive: true });
   mkdirSync(binDir, { recursive: true });
-  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  initTrackedRepo(openclawDir);
   const codexPath = join(binDir, "codex");
   writeFileSync(
     codexPath,
     `#!/usr/bin/env node
+${fakeCodexSandboxPass}
 const fs = require("node:fs");
 const attemptsPath = process.env.CODEX_ATTEMPTS_PATH;
 const attempt = fs.existsSync(attemptsPath) ? Number(fs.readFileSync(attemptsPath, "utf8")) + 1 : 1;
