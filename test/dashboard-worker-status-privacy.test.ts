@@ -101,6 +101,31 @@ test("public status projection drops over-depth values and retains closed health
   assert.equal(JSON.stringify(projected).includes("synthetic-over-depth-token"), false);
 });
 
+test("public status projection retains every closed Bay stage count", () => {
+  const projected = publicStatusProjection({
+    exact_review_queue: {
+      bay_projection: {
+        stages: {
+          arriving: 1,
+          "setting-up": 2,
+          reviewing: 3,
+          publishing: 4,
+          applying: 5,
+          repairing: 6,
+        },
+      },
+    },
+  });
+  assert.deepEqual(projected.exact_review_queue.bay_projection.stages, {
+    arriving: 1,
+    "setting-up": 2,
+    reviewing: 3,
+    publishing: 4,
+    applying: 5,
+    repairing: 6,
+  });
+});
+
 test("public status projection drops malformed and unrecognized text while retaining bounded counts", () => {
   const projected = publicStatusProjection({
     schema_version: 1,

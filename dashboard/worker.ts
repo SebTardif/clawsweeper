@@ -1473,6 +1473,8 @@ const PUBLIC_STATUS_BLOCKED_FIELD_PARTS = new Set([
 ]);
 
 const PUBLIC_STATUS_COUNT_FIELDS = new Set([
+  "applying",
+  "arriving",
   "active_codex_jobs",
   "active",
   "active_intake_runs",
@@ -1503,6 +1505,7 @@ const PUBLIC_STATUS_COUNT_FIELDS = new Set([
   "pending",
   "pending_depth",
   "processed",
+  "publishing",
   "promotion_cooldown_eligible",
   "promotion_eligible",
   "proof_required",
@@ -1510,6 +1513,7 @@ const PUBLIC_STATUS_COUNT_FIELDS = new Set([
   "recovered_failures",
   "recovery_rate_percent",
   "review_refresh",
+  "repairing",
   "reviewing",
   "running",
   "sample_limit",
@@ -1578,6 +1582,7 @@ function publicStatusValue(value, field, depth) {
 }
 
 function publicStatusFieldAllowed(field, value) {
+  if (field === "setting-up" && typeof value === "number") return true;
   if (!/^[a-z][a-z0-9_]{0,63}$/.test(field)) return false;
   if (PUBLIC_STATUS_SAFE_OBJECT_FIELDS.has(field)) return true;
   if (typeof value === "number") {
