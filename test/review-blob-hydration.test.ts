@@ -11,6 +11,7 @@ import {
   hydratePullRequestReviewBlobs,
   materializePullRequestReviewTree,
   removePullRequestReviewTree,
+  reviewBlobGitSpawnTimeoutsForTest,
 } from "../dist/clawsweeper-review-blobs.js";
 
 function git(cwd: string, ...args: string[]): string {
@@ -338,6 +339,18 @@ test("review hydration enforces per-review byte limits without fetching oversize
       rmSync(fixture.root, { recursive: true, force: true });
     }
   }
+});
+
+test("review blob git spawn options include a fetch timeout and a local timeout", () => {
+  const timeouts = reviewBlobGitSpawnTimeoutsForTest();
+  assert.equal(timeouts.fetchMs, 180_000);
+  assert.equal(timeouts.localMs, 60_000);
+  const source = readFileSync(
+    new URL("../src/clawsweeper-review-blobs.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /timeout:\s*REVIEW_GIT_FETCH_TIMEOUT_MS/);
+  assert.match(source, /timeout:\s*REVIEW_GIT_LOCAL_TIMEOUT_MS/);
 });
 
 test("review blob sizes use one bounded GraphQL metadata request", () => {

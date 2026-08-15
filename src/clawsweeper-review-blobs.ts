@@ -5,7 +5,27 @@ import { reviewMergeBase } from "./pr-review-evidence.js";
 const MAX_REVIEW_FILES = 80;
 const MAX_GIT_OUTPUT_BYTES = 4 * 1024 * 1024;
 const MAX_REVIEW_BLOB_BYTES = 4 * 1024 * 1024;
+const REVIEW_GIT_FETCH_TIMEOUT_MS = 180_000;
+const REVIEW_GIT_LOCAL_TIMEOUT_MS = 60_000;
 const GIT_OBJECT_ID = /^[0-9a-f]{40,64}$/i;
+
+function reviewGitSpawnOptions(
+  targetDir: string,
+  extra: { timeout: number; input?: string; env?: NodeJS.ProcessEnv },
+) {
+  return {
+    cwd: targetDir,
+    encoding: "utf8" as const,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", ...extra.env },
+    maxBuffer: MAX_GIT_OUTPUT_BYTES,
+    timeout: extra.timeout,
+    ...(extra.input === undefined ? {} : { input: extra.input }),
+  };
+}
+
+export function reviewBlobGitSpawnTimeoutsForTest() {
+  return { fetchMs: REVIEW_GIT_FETCH_TIMEOUT_MS, localMs: REVIEW_GIT_LOCAL_TIMEOUT_MS };
+}
 
 type ReviewBlobFile = {
   filename?: unknown;
@@ -249,12 +269,11 @@ export function hydratePullRequestReviewBlobs({
     [headSha, headPaths],
   ] as const) {
     if (paths.size === 0) continue;
-    const tree = spawnSync("git", ["--literal-pathspecs", "ls-tree", "-z", sha, "--", ...paths], {
-      cwd: targetDir,
-      encoding: "utf8",
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
-      maxBuffer: MAX_GIT_OUTPUT_BYTES,
-    });
+    const tree = spawnSync(
+      "git",
+      ["--literal-pathspecs", "ls-tree", "-z", sha, "--", ...paths],
+      reviewGitSpawnOptions(targetDir, { timeout: REVIEW_GIT_LOCAL_TIMEOUT_MS }),
+    );
     if (tree.error || tree.status !== 0) return { hydrated: false, blobs: 0 };
     for (const entry of tree.stdout.split("\0")) {
       if (!entry) continue;
@@ -280,12 +299,7 @@ export function hydratePullRequestReviewBlobs({
       "--",
       ...new Set([...basePaths, ...headPaths]),
     ],
-    {
-      cwd: targetDir,
-      encoding: "utf8",
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
-      maxBuffer: MAX_GIT_OUTPUT_BYTES,
-    },
+    reviewGitSpawnOptions(targetDir, { timeout: REVIEW_GIT_LOCAL_TIMEOUT_MS }),
   );
   if (objectAvailability.error || objectAvailability.status !== 0) {
     return { hydrated: false, blobs: 0 };
@@ -306,13 +320,11 @@ export function hydratePullRequestReviewBlobs({
     const localObjects = spawnSync(
       "git",
       ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
-      {
-        cwd: targetDir,
-        encoding: "utf8",
-        env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_NO_LAZY_FETCH: "1" },
+      reviewGitSpawnOptions(targetDir, {
+        timeout: REVIEW_GIT_LOCAL_TIMEOUT_MS,
+        env: { GIT_NO_LAZY_FETCH: "1" },
         input: `${localObjectIds.join("\n")}\n`,
-        maxBuffer: MAX_GIT_OUTPUT_BYTES,
-      },
+      }),
     );
     if (localObjects.error || localObjects.status !== 0) return { hydrated: false, blobs: 0 };
     const found = localObjects.stdout.trim().split("\n");
@@ -373,13 +385,10 @@ export function hydratePullRequestReviewBlobs({
         "--filter=blob:none",
         "--stdin",
       ],
-      {
-        cwd: targetDir,
-        encoding: "utf8",
-        env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+      reviewGitSpawnOptions(targetDir, {
+        timeout: REVIEW_GIT_FETCH_TIMEOUT_MS,
         input: `${boundedMissing.join("\n")}\n`,
-        maxBuffer: MAX_GIT_OUTPUT_BYTES,
-      },
+      }),
     );
     if (fetched.error || fetched.status !== 0) return { hydrated: false, blobs: 0 };
   }

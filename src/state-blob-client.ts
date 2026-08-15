@@ -1,6 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 
 const SINGLE_PUT_MAX_BYTES = 24 * 1024 * 1024;
+const STATE_BLOB_REQUEST_TIMEOUT_MS = 15_000;
 
 type StateBlobClientOptions = {
   baseUrl: string;
@@ -100,6 +101,7 @@ async function signedBlobPost<T>(
             "x-clawsweeper-exact-review-signature": signature,
           },
           body,
+          signal: AbortSignal.timeout(STATE_BLOB_REQUEST_TIMEOUT_MS),
         },
       );
       const value = (await response.json().catch(() => null)) as unknown;
