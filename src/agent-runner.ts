@@ -91,8 +91,8 @@ export function runAgentCheckoutInspection(options: {
   if (trackedFiles.error || trackedFiles.status !== 0) return spawnResult(trackedFiles);
   const candidates = (trackedFiles.stdout ?? "").split("\0").flatMap((entry) => {
     const match = /^(?:100644|100755) [0-9a-f]{40,64} 0\t(.+)$/.exec(entry);
-    const path = match?.[1] ?? "";
-    return /^[A-Za-z0-9._/-]+$/.test(path) ? [path] : [];
+    const path = match?.[1];
+    return path ? [path] : [];
   });
   const start = candidates.length > 0 ? randomInt(candidates.length) : 0;
   const orderedCandidates = [...candidates.slice(start), ...candidates.slice(0, start)];
@@ -146,12 +146,23 @@ export function runAgentCheckoutInspection(options: {
     );
   }
   const model = openclawModel(env);
+  const encodedFingerprintPath = Buffer.from(fingerprintPath).toString("base64url");
+  const inspectionCommand = [
+    "node -e '",
+    'const{execFileSync}=require("node:child_process");',
+    'const path=Buffer.from(process.argv[1],"base64url").toString("utf8");',
+    'try{const status=execFileSync("git",["status","--porcelain=v1","--untracked-files=no"],{encoding:"utf8"});',
+    "if(status)process.exit(1);",
+    'process.stdout.write(execFileSync("git",["hash-object","--",path],{encoding:"utf8"}));',
+    "}catch{process.exit(1)}",
+    `' '${encodedFingerprintPath}'`,
+  ].join("");
   const result = redactOpenclawFailure(
     runOpenclawProcess({
       label: "checkout-inspection",
       prompt: [
         "Use the exec tool to run this command in the workspace:",
-        `git status --porcelain=v1 --untracked-files=no && git hash-object -- ${fingerprintPath}`,
+        inspectionCommand,
         "Return only the command stdout, with no explanation or formatting.",
       ].join("\n"),
       model,

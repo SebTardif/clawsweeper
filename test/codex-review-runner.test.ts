@@ -29,10 +29,10 @@ const fakeCodexSandboxPass = `if (process.argv[2] === "sandbox") {
   process.exit(0);
 }`;
 
-function initTrackedRepo(dir: string): void {
+function initTrackedRepo(dir: string, trackedPath = "tracked.txt"): void {
   execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
-  writeFileSync(join(dir, "tracked.txt"), trackedCheckoutContent);
-  execFileSync("git", ["add", "tracked.txt"], { cwd: dir, stdio: "ignore" });
+  writeFileSync(join(dir, trackedPath), trackedCheckoutContent);
+  execFileSync("git", ["add", trackedPath], { cwd: dir, stdio: "ignore" });
   execFileSync(
     "git",
     ["-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
@@ -210,6 +210,65 @@ process.exit(0);
   }
 });
 
+test("runCodex supports whitespace and Unicode in regular tracked paths", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const openclawDir = join(root, "openclaw");
+  const workDir = join(root, "codex-work");
+  const binDir = join(root, "bin");
+  const argsPath = join(root, "codex-args");
+  const trackedPath = "review proof ü.txt";
+  mkdirSync(openclawDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  initTrackedRepo(openclawDir, trackedPath);
+  const codexPath = join(binDir, "codex");
+  writeFileSync(
+    codexPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(process.env.CODEX_ARGS_PATH, JSON.stringify(process.argv.slice(2)) + "\\n");
+${fakeCodexSandboxPass}
+const outputIndex = process.argv.indexOf("--output-last-message");
+fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON);
+`,
+  );
+  chmodSync(codexPath, 0o755);
+  const previous = {
+    PATH: process.env.PATH,
+    CODEX_ARGS_PATH: process.env.CODEX_ARGS_PATH,
+    CODEX_DECISION_JSON: process.env.CODEX_DECISION_JSON,
+  };
+  process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
+  process.env.CODEX_ARGS_PATH = argsPath;
+  process.env.CODEX_DECISION_JSON = JSON.stringify(closeDecision({ decision: "keep_open" }));
+  try {
+    const decision = runCodexForTest({
+      item: item({ number: 83401 }),
+      context: { issue: {}, comments: [], timeline: [] },
+      git: { mainSha: "abc123", latestRelease: null },
+      model: "model-test",
+      openclawDir,
+      reasoningEffort: "high",
+      sandboxMode: "read-only",
+      serviceTier: "",
+      timeoutMs: 10_000,
+      workDir,
+      prompt: "Return a review decision.",
+    });
+    assert.equal(decision.localCheckoutAccess, "verified");
+    const [inspectionArgs] = readFileSync(argsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    assert.equal(inspectionArgs?.at(-1), trackedPath);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test(
   "runCodex rejects a tracked symlink that escapes the checkout",
   { skip: process.platform === "win32" },
@@ -345,7 +404,8 @@ test("runCodex verifies checkout access through the OpenClaw tool gateway", () =
   const openclawPath = join(root, "fake-openclaw");
   const promptsPath = join(root, "openclaw-prompts");
   mkdirSync(openclawDir, { recursive: true });
-  initTrackedRepo(openclawDir);
+  const trackedPath = "review proof ü.txt";
+  initTrackedRepo(openclawDir, trackedPath);
   const expected = closeDecision({ decision: "keep_open", summary: "Reviewed with OpenClaw." });
   writeFileSync(
     openclawPath,
@@ -354,9 +414,9 @@ const fs = require("node:fs");
 const childProcess = require("node:child_process");
 const prompt = fs.readFileSync(process.argv[process.argv.indexOf("--message-file") + 1], "utf8");
 fs.appendFileSync(process.env.OPENCLAW_TEST_PROMPTS_PATH, prompt + "\\n---\\n");
-const fingerprintMarker = "git hash-object -- ";
-const fingerprintLine = prompt.split("\\n").find((line) => line.includes(fingerprintMarker));
-const fingerprintPath = fingerprintLine?.slice(fingerprintLine.indexOf(fingerprintMarker) + fingerprintMarker.length).trim();
+const fingerprintLine = prompt.split("\\n").find((line) => line.startsWith("node -e "));
+const encodedPath = fingerprintLine?.match(/ '([A-Za-z0-9_-]+)'$/)?.[1];
+const fingerprintPath = encodedPath ? Buffer.from(encodedPath, "base64url").toString("utf8") : null;
 const text = fingerprintPath
   ? childProcess.execFileSync("git", ["hash-object", "--", fingerprintPath], { cwd: process.env.OPENCLAW_WORKSPACE_DIR, encoding: "utf8" }).trim()
   : ${JSON.stringify(JSON.stringify(expected))};
@@ -393,10 +453,8 @@ process.stdout.write(JSON.stringify({ payloads: [{ text }], meta: { stopReason: 
     assert.equal(decision.summary, "Reviewed with OpenClaw.");
     assert.equal(decision.localCheckoutAccess, "verified");
     const prompts = readFileSync(promptsPath, "utf8");
-    assert.match(
-      prompts,
-      /git status --porcelain=v1 --untracked-files=no[^\n]+git hash-object -- tracked\.txt/,
-    );
+    assert.match(prompts, new RegExp(Buffer.from(trackedPath).toString("base64url")));
+    assert.doesNotMatch(prompts, new RegExp(trackedPath));
     assert.match(prompts, /Return a review decision/);
   } finally {
     for (const [key, value] of Object.entries(previous)) {
