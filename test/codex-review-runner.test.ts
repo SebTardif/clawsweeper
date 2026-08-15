@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { delimiter, join } from "node:path";
@@ -207,6 +209,74 @@ process.exit(0);
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test(
+  "runCodex rejects a tracked symlink that escapes the checkout",
+  { skip: process.platform === "win32" },
+  () => {
+    const root = mkdtempSync(tmpPrefix);
+    const openclawDir = join(root, "openclaw");
+    const workDir = join(root, "codex-work");
+    const binDir = join(root, "bin");
+    const invocationsPath = join(root, "codex-invocations");
+    const outsidePath = join(root, "outside.txt");
+    mkdirSync(openclawDir, { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+    writeFileSync(outsidePath, trackedCheckoutContent);
+    symlinkSync(outsidePath, join(openclawDir, "escape-link"));
+    execFileSync("git", ["add", "escape-link"], { cwd: openclawDir, stdio: "ignore" });
+    execFileSync(
+      "git",
+      ["-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+      { cwd: openclawDir, stdio: "ignore" },
+    );
+    const codexPath = join(binDir, "codex");
+    writeFileSync(
+      codexPath,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(process.env.CODEX_INVOCATIONS_PATH, JSON.stringify(process.argv.slice(2)) + "\\n");
+if (process.argv[2] === "sandbox") {
+  process.stdout.write(${JSON.stringify(trackedCheckoutFingerprint)} + "\\n");
+  process.exit(0);
+}
+process.exit(0);
+`,
+    );
+    chmodSync(codexPath, 0o755);
+    const previous = {
+      PATH: process.env.PATH,
+      CODEX_INVOCATIONS_PATH: process.env.CODEX_INVOCATIONS_PATH,
+    };
+    process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
+    process.env.CODEX_INVOCATIONS_PATH = invocationsPath;
+    try {
+      assert.throws(() =>
+        runCodexForTest({
+          item: item({ number: 83400 }),
+          context: { issue: {}, comments: [], timeline: [] },
+          git: { mainSha: "abc123", latestRelease: null },
+          model: "model-test",
+          openclawDir,
+          reasoningEffort: "high",
+          sandboxMode: "read-only",
+          serviceTier: "",
+          timeoutMs: 10_000,
+          workDir,
+          prompt: "Return a review decision.",
+        }),
+      );
+      assert.equal(existsSync(invocationsPath), false);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("runCodex counts checkout inspection against the review timeout", () => {
   const root = mkdtempSync(tmpPrefix);

@@ -82,16 +82,18 @@ export function runAgentCheckoutInspection(options: {
   timeoutMs: number;
 }): CodexProcessResult {
   const env = { ...options.env, GIT_OPTIONAL_LOCKS: "0" };
-  const trackedFiles = spawnSync("git", ["ls-files", "-z"], {
+  const trackedFiles = spawnSync("git", ["ls-files", "--stage", "-z"], {
     cwd: options.cwd,
     encoding: "utf8",
     env,
     timeout: options.timeoutMs,
   });
   if (trackedFiles.error || trackedFiles.status !== 0) return spawnResult(trackedFiles);
-  const candidates = (trackedFiles.stdout ?? "")
-    .split("\0")
-    .filter((path) => /^[A-Za-z0-9._/-]+$/.test(path));
+  const candidates = (trackedFiles.stdout ?? "").split("\0").flatMap((entry) => {
+    const match = /^(?:100644|100755) [0-9a-f]{40,64} 0\t(.+)$/.exec(entry);
+    const path = match?.[1] ?? "";
+    return /^[A-Za-z0-9._/-]+$/.test(path) ? [path] : [];
+  });
   const start = candidates.length > 0 ? randomInt(candidates.length) : 0;
   const orderedCandidates = [...candidates.slice(start), ...candidates.slice(0, start)];
   let fingerprintPath = "";
