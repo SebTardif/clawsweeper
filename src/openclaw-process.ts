@@ -35,7 +35,6 @@ export interface OpenClawProcessOptions {
   outputFileBytes?: number;
   stdoutPath?: string;
   stderrPath?: string;
-  toolAccess?: "review" | "read-only-inspection";
 }
 
 export function runOpenclawProcess(options: OpenClawProcessOptions): CodexProcessResult {
@@ -48,16 +47,10 @@ export function runOpenclawProcess(options: OpenClawProcessOptions): CodexProces
   const stderrPath = options.stderrPath ?? join(stateDir, "stderr.log");
   try {
     const timeoutSeconds = Math.max(1, Math.ceil(options.timeoutMs / 1_000));
-    writeFileSync(
-      configPath,
-      `${JSON.stringify(
-        openclawConfig(options.env, timeoutSeconds, options.toolAccess ?? "review"),
-      )}\n`,
-      {
-        encoding: "utf8",
-        mode: 0o600,
-      },
-    );
+    writeFileSync(configPath, `${JSON.stringify(openclawConfig(options.env, timeoutSeconds))}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
     writeFileSync(promptPath, options.prompt, { encoding: "utf8", mode: 0o600 });
     const args = [
       "agent",
@@ -163,11 +156,7 @@ export function parseOpenclawJsonEnvelope(
   };
 }
 
-function openclawConfig(
-  env: NodeJS.ProcessEnv,
-  timeoutSeconds: number,
-  toolAccess: "review" | "read-only-inspection",
-): Record<string, unknown> {
+function openclawConfig(env: NodeJS.ProcessEnv, timeoutSeconds: number): Record<string, unknown> {
   const config: Record<string, unknown> = {
     agents: {
       defaults: {
@@ -176,18 +165,11 @@ function openclawConfig(
         timeoutSeconds,
       },
     },
-    tools:
-      toolAccess === "read-only-inspection"
-        ? {
-            allow: ["read"],
-            fs: { workspaceOnly: true },
-            exec: { host: "gateway", mode: "deny" },
-          }
-        : {
-            profile: "coding",
-            fs: { workspaceOnly: true },
-            exec: { host: "gateway", mode: "full" },
-          },
+    tools: {
+      profile: "coding",
+      fs: { workspaceOnly: true },
+      exec: { host: "gateway", mode: "full" },
+    },
   };
   const providersJson = env.CLAWSWEEPER_OPENCLAW_PROVIDERS_JSON?.trim();
   if (!providersJson) {
