@@ -117,6 +117,93 @@ test("OpenClaw process emits isolated config and invocation, joins payloads, and
   }
 });
 
+test("OpenClaw checkout inspection requires structured read evidence", () => {
+  const root = mkdtempSync(join(tmpdir(), "clawsweeper-openclaw-test-"));
+  const recordPath = join(root, "record.json");
+  const binary = fakeOpenclaw(root);
+  try {
+    const result = runOpenclawProcess({
+      label: "checkout-inspection",
+      prompt: "Read the challenged line.",
+      model: "openai/test",
+      cwd: root,
+      env: {
+        ...process.env,
+        CLAWSWEEPER_OPENCLAW_BIN: binary,
+        OPENCLAW_TEST_RECORD: recordPath,
+        OPENCLAW_TEST_STDOUT: JSON.stringify({
+          payloads: [{ text: "tracked checkout content" }],
+          meta: {
+            stopReason: "stop",
+            toolSummary: { calls: 1, tools: ["read"], failures: 0 },
+          },
+        }),
+      },
+      timeoutMs: 10_000,
+      checkoutInspection: { expectedText: "tracked checkout content" },
+    });
+    assert.equal(result.status, 0, result.error?.message);
+    assert.equal(result.stdout, "");
+    const record = JSON.parse(readFileSync(recordPath, "utf8"));
+    assert.deepEqual(record.config.tools, {
+      allow: ["read"],
+      fs: { workspaceOnly: true },
+      exec: { host: "gateway", mode: "deny" },
+    });
+
+    for (const [name, envelope, expectedError] of [
+      [
+        "missing summary",
+        { payloads: [{ text: "tracked checkout content" }], meta: { stopReason: "stop" } },
+        /successful read tool call/,
+      ],
+      [
+        "wrong tool",
+        {
+          payloads: [{ text: "tracked checkout content" }],
+          meta: { toolSummary: { calls: 1, tools: ["exec"], failures: 0 } },
+        },
+        /successful read tool call/,
+      ],
+      [
+        "failed read",
+        {
+          payloads: [{ text: "tracked checkout content" }],
+          meta: { toolSummary: { calls: 1, tools: ["read"], failures: 1 } },
+        },
+        /successful read tool call/,
+      ],
+      [
+        "wrong text",
+        {
+          payloads: [{ text: "different checkout content" }],
+          meta: { toolSummary: { calls: 1, tools: ["read"], failures: 0 } },
+        },
+        /runner challenge/,
+      ],
+    ] as const) {
+      const rejected = runOpenclawProcess({
+        label: `checkout-inspection-${name}`,
+        prompt: "Read the challenged line.",
+        model: "openai/test",
+        cwd: root,
+        env: {
+          ...process.env,
+          CLAWSWEEPER_OPENCLAW_BIN: binary,
+          OPENCLAW_TEST_RECORD: recordPath,
+          OPENCLAW_TEST_STDOUT: JSON.stringify(envelope),
+        },
+        timeoutMs: 10_000,
+        checkoutInspection: { expectedText: "tracked checkout content" },
+      });
+      assert.equal(rejected.status, 1, name);
+      assert.match(rejected.error?.message ?? "", expectedError, name);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("OpenClaw exit-zero error envelopes synthesize process failures", () => {
   const root = mkdtempSync(join(tmpdir(), "clawsweeper-openclaw-test-"));
   const binary = fakeOpenclaw(root);

@@ -456,7 +456,7 @@ if (process.argv[2] === "sandbox") {
   }
 });
 
-test("runCodex refuses OpenClaw verification without structured read evidence", () => {
+test("runCodex rejects OpenClaw checkout text without structured read evidence", () => {
   const root = mkdtempSync(tmpPrefix);
   const openclawDir = join(root, "openclaw");
   const workDir = join(root, "review-work");
@@ -506,9 +506,72 @@ process.stdout.write(JSON.stringify({ payloads: [{ text }], meta: { stopReason: 
           workDir,
           prompt: "Return a review decision.",
         }),
-      /structured read-tool evidence/,
+      /successful read tool call/,
     );
-    assert.equal(existsSync(invocationsPath), false);
+    assert.equal(readFileSync(invocationsPath, "utf8"), "1");
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runCodex reviews after an attested OpenClaw checkout read", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const openclawDir = join(root, "openclaw");
+  const workDir = join(root, "review-work");
+  const openclawPath = join(root, "fake-openclaw");
+  const invocationsPath = join(root, "openclaw-invocations");
+  mkdirSync(openclawDir, { recursive: true });
+  initTrackedRepo(openclawDir);
+  const expected = closeDecision({ decision: "keep_open", summary: "Reviewed with OpenClaw." });
+  writeFileSync(
+    openclawPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const count = fs.existsSync(process.env.OPENCLAW_TEST_INVOCATIONS_PATH)
+  ? Number(fs.readFileSync(process.env.OPENCLAW_TEST_INVOCATIONS_PATH, "utf8"))
+  : 0;
+fs.writeFileSync(process.env.OPENCLAW_TEST_INVOCATIONS_PATH, String(count + 1));
+const inspection = {
+  payloads: [{ text: "tracked checkout content" }],
+  meta: { stopReason: "stop", toolSummary: { calls: 1, tools: ["read"], failures: 0 } },
+};
+const review = { payloads: [{ text: ${JSON.stringify(JSON.stringify(expected))} }], meta: { stopReason: "stop" } };
+process.stdout.write(JSON.stringify(count === 0 ? inspection : review));
+`,
+  );
+  chmodSync(openclawPath, 0o755);
+  const previous = {
+    CLAWSWEEPER_RUNNER: process.env.CLAWSWEEPER_RUNNER,
+    CLAWSWEEPER_OPENCLAW_BIN: process.env.CLAWSWEEPER_OPENCLAW_BIN,
+    CLAWSWEEPER_OPENCLAW_MODEL: process.env.CLAWSWEEPER_OPENCLAW_MODEL,
+    CODEX_BIN: process.env.CODEX_BIN,
+    OPENCLAW_TEST_INVOCATIONS_PATH: process.env.OPENCLAW_TEST_INVOCATIONS_PATH,
+  };
+  process.env.CLAWSWEEPER_RUNNER = "openclaw";
+  process.env.CLAWSWEEPER_OPENCLAW_BIN = openclawPath;
+  process.env.CLAWSWEEPER_OPENCLAW_MODEL = "openai/gpt-5";
+  process.env.CODEX_BIN = join(root, "missing-codex");
+  process.env.OPENCLAW_TEST_INVOCATIONS_PATH = invocationsPath;
+  try {
+    const decision = runCodexForTest({
+      item: item({ number: 83396 }),
+      context: { issue: {}, comments: [], timeline: [] },
+      git: { mainSha: "abc123", latestRelease: null },
+      model: "internal",
+      openclawDir,
+      reasoningEffort: "high",
+      sandboxMode: "read-only",
+      serviceTier: "",
+      timeoutMs: 10_000,
+      workDir,
+      prompt: "Return a review decision.",
+    });
+    assert.equal(decision.summary, "Reviewed with OpenClaw.");
+    assert.equal(readFileSync(invocationsPath, "utf8"), "2");
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];

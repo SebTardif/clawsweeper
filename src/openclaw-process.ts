@@ -35,6 +35,13 @@ export interface OpenClawProcessOptions {
   outputFileBytes?: number;
   stdoutPath?: string;
   stderrPath?: string;
+  checkoutInspection?: { expectedText: string };
+}
+
+interface OpenClawToolSummary {
+  calls: number;
+  tools: string[];
+  failures?: number;
 }
 
 export function runOpenclawProcess(options: OpenClawProcessOptions): CodexProcessResult {
@@ -47,10 +54,14 @@ export function runOpenclawProcess(options: OpenClawProcessOptions): CodexProces
   const stderrPath = options.stderrPath ?? join(stateDir, "stderr.log");
   try {
     const timeoutSeconds = Math.max(1, Math.ceil(options.timeoutMs / 1_000));
-    writeFileSync(configPath, `${JSON.stringify(openclawConfig(options.env, timeoutSeconds))}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-    });
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(openclawConfig(options.env, timeoutSeconds, Boolean(options.checkoutInspection)))}\n`,
+      {
+        encoding: "utf8",
+        mode: 0o600,
+      },
+    );
     writeFileSync(promptPath, options.prompt, { encoding: "utf8", mode: 0o600 });
     const args = [
       "agent",
@@ -116,7 +127,11 @@ export function runOpenclawProcess(options: OpenClawProcessOptions): CodexProces
     }
     const processResult = deserializeResult(JSON.parse(readFileSync(resultPath, "utf8")));
     if (worker.error) return { ...processResult, error: worker.error };
-    return normalizeOpenclawResult(processResult, readFileSync(stdoutPath, "utf8"));
+    return normalizeOpenclawResult(
+      processResult,
+      readFileSync(stdoutPath, "utf8"),
+      options.checkoutInspection,
+    );
   } catch (error) {
     return failedResult(error instanceof Error ? error : new Error(String(error)));
   } finally {
@@ -127,7 +142,7 @@ export function runOpenclawProcess(options: OpenClawProcessOptions): CodexProces
 export function parseOpenclawJsonEnvelope(
   stdout: string,
   stderr = "",
-): { text: string; failure?: Error } {
+): { text: string; toolSummary?: OpenClawToolSummary; failure?: Error } {
   let envelope: unknown;
   try {
     envelope = JSON.parse(stdout);
@@ -150,13 +165,20 @@ export function parseOpenclawJsonEnvelope(
     .filter(Boolean)
     .join("\n");
   const failureDetail = openclawFailureDetail(envelope, result, payloads);
+  const meta = isRecord(result.meta) ? result.meta : {};
+  const toolSummary = parseToolSummary(meta.toolSummary);
   return {
     text,
+    ...(toolSummary ? { toolSummary } : {}),
     ...(failureDetail ? { failure: new Error(`OpenClaw agent failed: ${failureDetail}`) } : {}),
   };
 }
 
-function openclawConfig(env: NodeJS.ProcessEnv, timeoutSeconds: number): Record<string, unknown> {
+function openclawConfig(
+  env: NodeJS.ProcessEnv,
+  timeoutSeconds: number,
+  checkoutInspection: boolean,
+): Record<string, unknown> {
   const config: Record<string, unknown> = {
     agents: {
       defaults: {
@@ -165,11 +187,17 @@ function openclawConfig(env: NodeJS.ProcessEnv, timeoutSeconds: number): Record<
         timeoutSeconds,
       },
     },
-    tools: {
-      profile: "coding",
-      fs: { workspaceOnly: true },
-      exec: { host: "gateway", mode: "full" },
-    },
+    tools: checkoutInspection
+      ? {
+          allow: ["read"],
+          fs: { workspaceOnly: true },
+          exec: { host: "gateway", mode: "deny" },
+        }
+      : {
+          profile: "coding",
+          fs: { workspaceOnly: true },
+          exec: { host: "gateway", mode: "full" },
+        },
   };
   const providersJson = env.CLAWSWEEPER_OPENCLAW_PROVIDERS_JSON?.trim();
   if (!providersJson) {
@@ -203,14 +231,67 @@ function openclawConfig(env: NodeJS.ProcessEnv, timeoutSeconds: number): Record<
 function normalizeOpenclawResult(
   processResult: CodexProcessResult,
   completeStdout: string,
+  checkoutInspection?: { expectedText: string },
 ): CodexProcessResult {
   if (processResult.error || processResult.status !== 0) return processResult;
   const parsed = parseOpenclawJsonEnvelope(completeStdout, processResult.stderr);
-  if (!parsed.failure) return { ...processResult, stdout: parsed.text };
+  if (!parsed.failure) {
+    if (!checkoutInspection) return { ...processResult, stdout: parsed.text };
+    if (parsed.text.trim() !== checkoutInspection.expectedText) {
+      return failedInspectionResult(
+        processResult,
+        "OpenClaw checkout inspection did not return the runner challenge.",
+      );
+    }
+    // The runtime receipt proves the read tool ran; the withheld line proves
+    // that call observed the checkout selected by the host.
+    const summary = parsed.toolSummary;
+    if (
+      !summary ||
+      summary.calls < 1 ||
+      summary.tools.length !== 1 ||
+      summary.tools[0] !== "read" ||
+      (summary.failures ?? 0) !== 0
+    ) {
+      return failedInspectionResult(
+        processResult,
+        "OpenClaw checkout inspection did not report a successful read tool call.",
+      );
+    }
+    return { ...processResult, stdout: "" };
+  }
   if (/\btimeout\b/i.test(parsed.failure.message)) {
     (parsed.failure as NodeJS.ErrnoException).code = "ETIMEDOUT";
   }
   return { ...processResult, status: 1, error: parsed.failure, stdout: parsed.text };
+}
+
+function parseToolSummary(value: unknown): OpenClawToolSummary | undefined {
+  if (!isRecord(value)) return undefined;
+  if (typeof value.calls !== "number" || !Number.isInteger(value.calls) || value.calls < 0) {
+    return undefined;
+  }
+  if (!Array.isArray(value.tools) || !value.tools.every((tool) => typeof tool === "string")) {
+    return undefined;
+  }
+  if (
+    value.failures !== undefined &&
+    (typeof value.failures !== "number" || !Number.isInteger(value.failures) || value.failures < 0)
+  ) {
+    return undefined;
+  }
+  return {
+    calls: value.calls,
+    tools: value.tools,
+    ...(typeof value.failures === "number" ? { failures: value.failures } : {}),
+  };
+}
+
+function failedInspectionResult(
+  processResult: CodexProcessResult,
+  message: string,
+): CodexProcessResult {
+  return { ...processResult, status: 1, error: new Error(message), stdout: "" };
 }
 
 function openclawFailureDetail(

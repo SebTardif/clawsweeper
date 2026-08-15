@@ -1,6 +1,7 @@
 import { randomInt } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { codexModelArgs, redactInternalCodexModel } from "./codex-env.js";
 import {
   runCodexProcess,
@@ -82,17 +83,6 @@ export function runAgentCheckoutInspection(options: {
   timeoutMs: number;
 }): CodexProcessResult {
   const env = { ...options.env, GIT_OPTIONAL_LOCKS: "0" };
-  if (agentRunner(env) === "openclaw") {
-    return {
-      status: 1,
-      signal: null,
-      error: new Error(
-        "OpenClaw checkout inspection is paused until the runner exposes structured read-tool evidence.",
-      ),
-      stdout: "",
-      stderr: "",
-    };
-  }
   const trackedFiles = spawnSync("git", ["ls-files", "--stage", "-z"], {
     cwd: options.cwd,
     encoding: "utf8",
@@ -109,6 +99,34 @@ export function runAgentCheckoutInspection(options: {
   });
   const start = candidates.length > 0 ? randomInt(candidates.length) : 0;
   const orderedCandidates = [...candidates.slice(start), ...candidates.slice(0, start)];
+  if (agentRunner(env) === "openclaw") {
+    // Keep the expected line out of the prompt. The exact reply binds OpenClaw's
+    // structured read receipt to this checkout instead of trusting model prose.
+    const challenge = selectOpenclawCheckoutChallenge(options.cwd, orderedCandidates);
+    if (!challenge) {
+      return {
+        status: 1,
+        signal: null,
+        error: new Error("Checkout inspection could not select a tracked text line."),
+        stdout: "",
+        stderr: "",
+      };
+    }
+    return runOpenclawProcess({
+      label: "checkout-inspection",
+      prompt: [
+        "Use the read tool to inspect the workspace-relative file below.",
+        `Path: ${JSON.stringify(challenge.path)}`,
+        `Return exactly line ${challenge.lineNumber} with surrounding whitespace removed.`,
+        "Do not add quotes, code fences, or commentary.",
+      ].join("\n"),
+      model: openclawModel(env),
+      cwd: options.cwd,
+      env,
+      timeoutMs: options.timeoutMs,
+      checkoutInspection: { expectedText: challenge.text },
+    });
+  }
   let fingerprintPath = "";
   let fingerprint = "";
   for (const candidate of orderedCandidates) {
@@ -155,6 +173,41 @@ export function runAgentCheckoutInspection(options: {
     }),
     fingerprint,
   );
+}
+
+function selectOpenclawCheckoutChallenge(
+  cwd: string,
+  candidates: readonly string[],
+): { path: string; lineNumber: number; text: string } | undefined {
+  for (const path of candidates) {
+    try {
+      const absolutePath = join(cwd, path);
+      const stat = lstatSync(absolutePath);
+      if (!stat.isFile() || stat.size > 256 * 1024) continue;
+      const bytes = readFileSync(absolutePath);
+      const contents = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      const lines = contents.split(/\r?\n/);
+      const start = lines.length > 0 ? randomInt(lines.length) : 0;
+      for (let offset = 0; offset < lines.length; offset += 1) {
+        const lineNumber = ((start + offset) % lines.length) + 1;
+        const text = lines[lineNumber - 1]?.trim() ?? "";
+        if (text.length >= 16 && text.length <= 512 && !hasDisallowedControlCharacter(text)) {
+          return { path, lineNumber, text };
+        }
+      }
+    } catch {
+      // Try another tracked regular file; unreadable candidates cannot prove checkout access.
+    }
+  }
+  return undefined;
+}
+
+function hasDisallowedControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit < 32 || codeUnit === 127) return true;
+  }
+  return false;
 }
 
 function verifyCheckoutChallenge(
