@@ -1218,7 +1218,9 @@ test("dashboard reuses a current Bay snapshot from the shared status store", asy
       { waitUntil: () => undefined },
     );
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).pipeline[0].id, "shared-snapshot");
+    const status = await response.json();
+    assert.equal(status.pipeline[0].id, undefined);
+    assert.equal(status.bay.timings.sample_kind, "completed_review_journeys");
     assert.equal(networkRequests, 0);
   } finally {
     globalThis.fetch = originalFetch;

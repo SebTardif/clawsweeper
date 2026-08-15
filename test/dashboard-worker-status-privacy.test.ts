@@ -37,6 +37,7 @@ test("public status projection is fail-closed for nested identity-bearing metada
       },
     ],
     bay: {
+      timings: { sample_kind: "completed_review_journeys" },
       terminal_count: 1,
       terminal_buffer: [
         {
@@ -77,6 +78,7 @@ test("public status projection is fail-closed for nested identity-bearing metada
   assert.equal(projected.fleet.active_codex_jobs, 2);
   assert.equal(projected.fleet.worker_detail_runs, 3);
   assert.equal(projected.bay.terminal_count, 1);
+  assert.equal(projected.bay.timings.sample_kind, "completed_review_journeys");
   assert.deepEqual(projected.diagnostics, {
     errors: ["telemetry_unavailable"],
     error_count: 1,
