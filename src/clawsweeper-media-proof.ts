@@ -16,18 +16,34 @@ const MEDIA_PROOF_MANIFEST_FILE = "media-proof-manifest.json";
 const MEDIA_PROOF_SUMMARY_FILE = "media-proof-summary.md";
 const MAX_MEDIA_PROOF_URLS = 4;
 
+const MEDIA_PROOF_SPAWN_TIMEOUT_MS = 120_000;
+
+function mediaProofSpawnSyncOptions(
+  timeoutMs = MEDIA_PROOF_SPAWN_TIMEOUT_MS,
+  extra: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+) {
+  return {
+    cwd: extra.cwd,
+    env: extra.env,
+    encoding: "utf8" as const,
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: timeoutMs,
+  };
+}
+
 export function mediaProofCommandRunner(
   command: string,
   args: readonly string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
 ) {
-  return spawnSync(command, [...args], {
-    cwd: options.cwd,
-    env: options.env,
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-    timeout: options.timeoutMs,
-  });
+  return spawnSync(
+    command,
+    [...args],
+    mediaProofSpawnSyncOptions(options.timeoutMs ?? MEDIA_PROOF_SPAWN_TIMEOUT_MS, {
+      ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+      ...(options.env !== undefined ? { env: options.env } : {}),
+    }),
+  );
 }
 
 function trimTrailingUrlPunctuation(raw: string): string {
@@ -283,4 +299,13 @@ export function prepareMediaProofArtifactsForTest(
   runner: MediaProofCommandRunner,
 ): PreparedMediaProof {
   return prepareMediaProofArtifacts(context, proofScratchDir, runner);
+}
+
+export function mediaProofCommandRunnerOptionsForTest() {
+  return mediaProofSpawnSyncOptions();
+}
+
+export function createMediaProofCommandRunnerForTest(timeoutMs: number): MediaProofCommandRunner {
+  return (command, args, options = {}) =>
+    mediaProofCommandRunner(command, args, { ...options, timeoutMs });
 }

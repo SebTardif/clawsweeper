@@ -5,8 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  createMediaProofCommandRunnerForTest,
   isGitHubLabelCapacityErrorForTest,
   isMissingGitHubLabelErrorForTest,
+  mediaProofCommandRunnerOptionsForTest,
   prepareMediaProofArtifactsForTest,
   proofMediaUrlsFromContextForTest,
   proofVideoUrlsFromContextForTest,
@@ -531,6 +533,48 @@ test("media proof preparation surfaces a failed screenshot download as a failed 
     assert.equal(prepared.artifacts[0]?.status, "failed");
     assert.equal(prepared.artifacts[0]?.downloadedPath, null);
     assert.match(prepared.artifacts[0]?.detail ?? "", /download failed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("media proof default runner options include a spawn timeout", () => {
+  const options = mediaProofCommandRunnerOptionsForTest();
+  assert.equal(options.timeout, 120_000);
+});
+
+test("media proof runner times out a hung command and fails the video artifact", () => {
+  const dir = mkdtempSync(join(tmpdir(), "clawsweeper-media-proof-"));
+  try {
+    const runner = createMediaProofCommandRunnerForTest(50);
+    const hung = runner("sleep", ["30"]);
+    assert.notEqual(hung.status, 0);
+    assert.ok(hung.error);
+    assert.equal((hung.error as NodeJS.ErrnoException).code, "ETIMEDOUT");
+
+    const context = {
+      issue: {},
+      comments: [{ body: "Video: https://github.com/user/repo/releases/download/proof/demo.mov" }],
+      timeline: [],
+    };
+    const prepared = prepareMediaProofArtifactsForTest(context, dir, (command, args) => {
+      if (command === "curl") {
+        const outputIndex = args.indexOf("--output");
+        assert.notEqual(outputIndex, -1);
+        writeFileSync(String(args[outputIndex + 1]), "fake mov bytes");
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      if (command === "ffprobe") {
+        return runner("sleep", ["30"]);
+      }
+      return { status: 1, stdout: "", stderr: `unexpected command: ${command}` };
+    });
+
+    assert.equal(prepared.artifacts.length, 1);
+    assert.equal(prepared.artifacts[0]?.kind, "video");
+    assert.equal(prepared.artifacts[0]?.status, "failed");
+    assert.match(prepared.artifacts[0]?.detail ?? "", /ffprobe failed/);
+    assert.match(prepared.artifacts[0]?.detail ?? "", /ETIMEDOUT/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

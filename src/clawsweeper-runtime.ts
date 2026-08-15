@@ -147,6 +147,8 @@ export {
   sqliteSchemaChangeFromPullFilesForTest,
 } from "./clawsweeper-change-detection.js";
 export {
+  createMediaProofCommandRunnerForTest,
+  mediaProofCommandRunnerOptionsForTest,
   prepareMediaProofArtifactsForTest,
   proofMediaUrlsFromContextForTest,
   proofVideoUrlsFromContextForTest,
