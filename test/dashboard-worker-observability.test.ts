@@ -1452,8 +1452,9 @@ test("optional exact-review telemetry failures do not freeze an idle status snap
     assert.equal(status.exact_review_queue.pending, 0);
     assert.equal(status.recent_durable_publication_events, null);
     assert.deepEqual(status.diagnostics.errors, []);
-    assert.equal(status.diagnostics.exact_review_queue_error, null);
-    assert.equal(status.diagnostics.recent_durable_publication_events_error, "queue_read_failed");
+    assert.equal(status.diagnostics.exact_review_queue_error, undefined);
+    assert.equal(status.diagnostics.recent_durable_publication_events_error, undefined);
+    assert.equal(JSON.stringify(status).includes("queue_read_failed"), false);
 
     const cached = await worker.fetch(
       new Request("https://clawsweeper.openclaw.ai/api/status"),
@@ -1463,11 +1464,9 @@ test("optional exact-review telemetry failures do not freeze an idle status snap
     assert.equal(cached.headers.get("x-clawsweeper-cache"), "fresh");
     const cachedStatus = await cached.json();
     assert.equal(cachedStatus.exact_review_queue.pending, 0);
-    assert.equal(cachedStatus.diagnostics.exact_review_queue_error, null);
-    assert.equal(
-      cachedStatus.diagnostics.recent_durable_publication_events_error,
-      "queue_read_failed",
-    );
+    assert.equal(cachedStatus.diagnostics.exact_review_queue_error, undefined);
+    assert.equal(cachedStatus.diagnostics.recent_durable_publication_events_error, undefined);
+    assert.equal(JSON.stringify(cachedStatus).includes("queue_read_failed"), false);
     assert.equal(queueReads, 2);
   } finally {
     globalThis.fetch = originalFetch;

@@ -4374,9 +4374,7 @@ async function attachExactReviewQueueStatus(snapshot, env) {
     .map((item) => String(objectValue(item).item_key || ""))
     .filter(Boolean);
   let exactReviewQueue = null;
-  let exactReviewQueueError = null;
   let recentDurablePublicationEvents = null;
-  let recentDurablePublicationEventsError = null;
   const exactReviewQueueRequest = withTimeout(
     exactReviewQueueStatusSnapshot(env, { bayPriorityKeys }),
     OPTIONAL_SECTION_TIMEOUT_MS,
@@ -4392,23 +4390,17 @@ async function attachExactReviewQueueStatus(snapshot, env) {
     recentDurablePublicationEventsRequest,
   ]);
   if (queueResult.status === "fulfilled") exactReviewQueue = queueResult.value;
-  else
-    exactReviewQueueError =
-      queueResult.reason instanceof Error ? queueResult.reason.message : String(queueResult.reason);
   if (eventsResult.status === "fulfilled") recentDurablePublicationEvents = eventsResult.value;
-  else
-    recentDurablePublicationEventsError =
-      eventsResult.reason instanceof Error
-        ? eventsResult.reason.message
-        : String(eventsResult.reason);
   const attached = {
     ...snapshot,
     exact_review_queue: exactReviewQueue,
     recent_durable_publication_events: recentDurablePublicationEvents,
     diagnostics: {
       ...diagnostics,
-      exact_review_queue_error: exactReviewQueueError,
-      recent_durable_publication_events_error: recentDurablePublicationEventsError,
+      // Optional section failures remain useful to the bounded health summary, but
+      // rejection text is untrusted and can contain source-specific identifiers.
+      exact_review_queue_error: queueResult.status === "rejected",
+      recent_durable_publication_events_error: eventsResult.status === "rejected",
     },
   };
   return { ...attached, dashboard_health: summarizeDashboardHealth(attached) };
