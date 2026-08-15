@@ -1,6 +1,7 @@
 import { randomInt } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { codexModelArgs, redactInternalCodexModel } from "./codex-env.js";
 import {
   runCodexProcess,
@@ -90,14 +91,18 @@ export function runAgentCheckoutInspection(options: {
   });
   if (trackedFiles.error || trackedFiles.status !== 0) return spawnResult(trackedFiles);
   const candidates = (trackedFiles.stdout ?? "").split("\0").flatMap((entry) => {
-    const match = /^(?:100644|100755) [0-9a-f]{40,64} 0\t(.+)$/.exec(entry);
-    const path = match?.[1];
-    return path ? [path] : [];
+    const separator = entry.indexOf("\t");
+    if (separator < 0) return [];
+    const metadata = entry.slice(0, separator);
+    const path = entry.slice(separator + 1);
+    return /^(?:100644|100755) [0-9a-f]{40,64} 0$/.test(metadata) && path ? [path] : [];
   });
   const start = candidates.length > 0 ? randomInt(candidates.length) : 0;
   const orderedCandidates = [...candidates.slice(start), ...candidates.slice(0, start)];
   let fingerprintPath = "";
   let fingerprint = "";
+  let openclawChallenge: { lineNumber: number; expected: string } | undefined;
+  const runner = agentRunner(env);
   for (const candidate of orderedCandidates) {
     const hashed = spawnSync("git", ["hash-object", "--", candidate], {
       cwd: options.cwd,
@@ -106,9 +111,17 @@ export function runAgentCheckoutInspection(options: {
       timeout: options.timeoutMs,
     });
     const value = (hashed.stdout ?? "").trim();
-    if (!hashed.error && hashed.status === 0 && /^[0-9a-f]{40,64}$/.test(value)) {
+    const challenge =
+      runner === "openclaw" ? readChallenge(join(options.cwd, candidate)) : undefined;
+    if (
+      !hashed.error &&
+      hashed.status === 0 &&
+      /^[0-9a-f]{40,64}$/.test(value) &&
+      (runner === "codex" || challenge)
+    ) {
       fingerprintPath = candidate;
       fingerprint = value;
+      openclawChallenge = challenge;
       break;
     }
   }
@@ -121,7 +134,7 @@ export function runAgentCheckoutInspection(options: {
       stderr: "",
     };
   }
-  if (agentRunner(env) === "codex") {
+  if (runner === "codex") {
     return verifyCheckoutChallenge(
       runCodexProcess({
         args: [
@@ -146,33 +159,43 @@ export function runAgentCheckoutInspection(options: {
     );
   }
   const model = openclawModel(env);
-  const encodedFingerprintPath = Buffer.from(fingerprintPath).toString("base64url");
-  const inspectionCommand = [
-    "node -e '",
-    'const{execFileSync}=require("node:child_process");',
-    'const path=Buffer.from(process.argv[1],"base64url").toString("utf8");',
-    'try{const status=execFileSync("git",["status","--porcelain=v1","--untracked-files=no"],{encoding:"utf8"});',
-    "if(status)process.exit(1);",
-    'process.stdout.write(execFileSync("git",["hash-object","--",path],{encoding:"utf8"}));',
-    "}catch{process.exit(1)}",
-    `' '${encodedFingerprintPath}'`,
-  ].join("");
+  if (!openclawChallenge) throw new Error("OpenClaw checkout inspection challenge is missing.");
   const result = redactOpenclawFailure(
     runOpenclawProcess({
       label: "checkout-inspection",
       prompt: [
-        "Use the exec tool to run this command in the workspace:",
-        inspectionCommand,
-        "Return only the command stdout, with no explanation or formatting.",
+        "Use the read tool to inspect this workspace file.",
+        "Read this workspace-relative path (JSON string):",
+        JSON.stringify(fingerprintPath),
+        `Return exactly line ${openclawChallenge.lineNumber} as plain text.`,
+        "Do not add explanation, quotes, or formatting.",
       ].join("\n"),
       model,
       cwd: options.cwd,
       env,
       timeoutMs: options.timeoutMs,
+      toolAccess: "read-only-inspection",
     }),
     model,
   );
-  return verifyCheckoutChallenge(result, fingerprint, "OpenClaw");
+  return verifyCheckoutChallenge(result, openclawChallenge.expected, "OpenClaw");
+}
+
+function readChallenge(path: string): { lineNumber: number; expected: string } | undefined {
+  let content: string;
+  try {
+    content = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(path));
+  } catch {
+    return undefined;
+  }
+  const candidates = content
+    .split(/\r?\n/)
+    .map((line, index) => ({ lineNumber: index + 1, expected: line }))
+    .filter(
+      ({ expected }) =>
+        expected.length > 0 && expected.length <= 512 && expected.trim() === expected,
+    );
+  return candidates.length > 0 ? candidates[randomInt(candidates.length)] : undefined;
 }
 
 function verifyCheckoutChallenge(

@@ -269,6 +269,65 @@ fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON)
   }
 });
 
+test("runCodex supports newlines in regular tracked paths", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const openclawDir = join(root, "openclaw");
+  const workDir = join(root, "codex-work");
+  const binDir = join(root, "bin");
+  const argsPath = join(root, "codex-args");
+  const trackedPath = "review\nproof.txt";
+  mkdirSync(openclawDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  initTrackedRepo(openclawDir, trackedPath);
+  const codexPath = join(binDir, "codex");
+  writeFileSync(
+    codexPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(process.env.CODEX_ARGS_PATH, JSON.stringify(process.argv.slice(2)) + "\\n");
+${fakeCodexSandboxPass}
+const outputIndex = process.argv.indexOf("--output-last-message");
+fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON);
+`,
+  );
+  chmodSync(codexPath, 0o755);
+  const previous = {
+    PATH: process.env.PATH,
+    CODEX_ARGS_PATH: process.env.CODEX_ARGS_PATH,
+    CODEX_DECISION_JSON: process.env.CODEX_DECISION_JSON,
+  };
+  process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
+  process.env.CODEX_ARGS_PATH = argsPath;
+  process.env.CODEX_DECISION_JSON = JSON.stringify(closeDecision({ decision: "keep_open" }));
+  try {
+    const decision = runCodexForTest({
+      item: item({ number: 83402 }),
+      context: { issue: {}, comments: [], timeline: [] },
+      git: { mainSha: "abc123", latestRelease: null },
+      model: "model-test",
+      openclawDir,
+      reasoningEffort: "high",
+      sandboxMode: "read-only",
+      serviceTier: "",
+      timeoutMs: 10_000,
+      workDir,
+      prompt: "Return a review decision.",
+    });
+    assert.equal(decision.localCheckoutAccess, "verified");
+    const [inspectionArgs] = readFileSync(argsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    assert.equal(inspectionArgs?.at(-1), trackedPath);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test(
   "runCodex rejects a tracked symlink that escapes the checkout",
   { skip: process.platform === "win32" },
@@ -403,6 +462,7 @@ test("runCodex verifies checkout access through the OpenClaw tool gateway", () =
   const workDir = join(root, "review-work");
   const openclawPath = join(root, "fake-openclaw");
   const promptsPath = join(root, "openclaw-prompts");
+  const configsPath = join(root, "openclaw-configs");
   mkdirSync(openclawDir, { recursive: true });
   const trackedPath = "review proof ü.txt";
   initTrackedRepo(openclawDir, trackedPath);
@@ -411,14 +471,17 @@ test("runCodex verifies checkout access through the OpenClaw tool gateway", () =
     openclawPath,
     `#!/usr/bin/env node
 const fs = require("node:fs");
-const childProcess = require("node:child_process");
 const prompt = fs.readFileSync(process.argv[process.argv.indexOf("--message-file") + 1], "utf8");
 fs.appendFileSync(process.env.OPENCLAW_TEST_PROMPTS_PATH, prompt + "\\n---\\n");
-const fingerprintLine = prompt.split("\\n").find((line) => line.startsWith("node -e "));
-const encodedPath = fingerprintLine?.match(/ '([A-Za-z0-9_-]+)'$/)?.[1];
-const fingerprintPath = encodedPath ? Buffer.from(encodedPath, "base64url").toString("utf8") : null;
-const text = fingerprintPath
-  ? childProcess.execFileSync("git", ["hash-object", "--", fingerprintPath], { cwd: process.env.OPENCLAW_WORKSPACE_DIR, encoding: "utf8" }).trim()
+fs.appendFileSync(process.env.OPENCLAW_TEST_CONFIGS_PATH, fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH, "utf8"));
+const pathMarker = "Read this workspace-relative path (JSON string):\\n";
+const pathStart = prompt.indexOf(pathMarker);
+const pathLine = pathStart >= 0 ? prompt.slice(pathStart + pathMarker.length).split("\\n", 1)[0] : null;
+const lineMatch = prompt.match(/Return exactly line (\\d+)/);
+const challengePath = pathLine ? JSON.parse(pathLine) : null;
+const challengeLine = lineMatch ? Number(lineMatch[1]) : null;
+const text = challengePath && challengeLine
+  ? fs.readFileSync(require("node:path").join(process.env.OPENCLAW_WORKSPACE_DIR, challengePath), "utf8").split(/\\r?\\n/)[challengeLine - 1]
   : ${JSON.stringify(JSON.stringify(expected))};
 process.stdout.write(JSON.stringify({ payloads: [{ text }], meta: { stopReason: "stop" } }));
 `,
@@ -430,12 +493,14 @@ process.stdout.write(JSON.stringify({ payloads: [{ text }], meta: { stopReason: 
     CLAWSWEEPER_OPENCLAW_MODEL: process.env.CLAWSWEEPER_OPENCLAW_MODEL,
     CODEX_BIN: process.env.CODEX_BIN,
     OPENCLAW_TEST_PROMPTS_PATH: process.env.OPENCLAW_TEST_PROMPTS_PATH,
+    OPENCLAW_TEST_CONFIGS_PATH: process.env.OPENCLAW_TEST_CONFIGS_PATH,
   };
   process.env.CLAWSWEEPER_RUNNER = "openclaw";
   process.env.CLAWSWEEPER_OPENCLAW_BIN = openclawPath;
   process.env.CLAWSWEEPER_OPENCLAW_MODEL = "openai/gpt-5";
   process.env.CODEX_BIN = join(root, "missing-codex");
   process.env.OPENCLAW_TEST_PROMPTS_PATH = promptsPath;
+  process.env.OPENCLAW_TEST_CONFIGS_PATH = configsPath;
   try {
     const decision = runCodexForTest({
       item: item({ number: 83397 }),
@@ -453,9 +518,18 @@ process.stdout.write(JSON.stringify({ payloads: [{ text }], meta: { stopReason: 
     assert.equal(decision.summary, "Reviewed with OpenClaw.");
     assert.equal(decision.localCheckoutAccess, "verified");
     const prompts = readFileSync(promptsPath, "utf8");
-    assert.match(prompts, new RegExp(Buffer.from(trackedPath).toString("base64url")));
-    assert.doesNotMatch(prompts, new RegExp(trackedPath));
+    assert.match(prompts, /Read this workspace-relative path \(JSON string\):/);
+    assert.match(prompts, new RegExp(trackedPath));
     assert.match(prompts, /Return a review decision/);
+    const [inspectionConfig] = readFileSync(configsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.deepEqual(inspectionConfig?.tools, {
+      allow: ["read"],
+      fs: { workspaceOnly: true },
+      exec: { host: "gateway", mode: "deny" },
+    });
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
