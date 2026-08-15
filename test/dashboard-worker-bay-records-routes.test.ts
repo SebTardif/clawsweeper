@@ -2912,8 +2912,7 @@ async function renderPublicTriageApplication(
   pathname: string,
   fetchResponse: () => Promise<unknown>,
 ) {
-  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
-  const applicationScript = scripts.at(-1)?.[1] || "";
+  const applicationScript = publicTriageApplicationScript(html);
   const elements = new Map(
     [
       "metrics",
@@ -2954,6 +2953,18 @@ async function renderPublicTriageApplication(
   await new Promise((resolve) => setImmediate(resolve));
   return elements;
 }
+
+function publicTriageApplicationScript(html: string) {
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/gi)];
+  return scripts.at(-1)?.[1] || "";
+}
+
+test("public triage application script extraction is case-insensitive", () => {
+  assert.equal(
+    publicTriageApplicationScript("<SCRIPT>safeApplication()</SCRIPT>"),
+    "safeApplication()",
+  );
+});
 
 test("public triage UI renders only closed aggregate definitions and bounded counts", async () => {
   const response = await worker.fetch(new Request("https://clawsweeper.openclaw.ai/triage"), {});
