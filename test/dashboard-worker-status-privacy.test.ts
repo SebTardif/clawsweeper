@@ -38,12 +38,15 @@ test("public status projection is fail-closed for nested identity-bearing metada
     ],
     bay: {
       timings: { sample_kind: "completed_review_journeys" },
-      terminal_count: 1,
+      terminal_count: 3,
       terminal_buffer: [
         {
           item_key: "synthetic-owner/synthetic-repository#42",
           workflow_title: "synthetic nested workflow title",
+          outcome: "failure",
         },
+        { outcome: "cancelled" },
+        { outcome: "success" },
       ],
     },
     diagnostics: {
@@ -77,7 +80,12 @@ test("public status projection is fail-closed for nested identity-bearing metada
   ]);
   assert.equal(projected.fleet.active_codex_jobs, 2);
   assert.equal(projected.fleet.worker_detail_runs, 3);
-  assert.equal(projected.bay.terminal_count, 1);
+  assert.equal(projected.bay.terminal_count, 3);
+  assert.deepEqual(projected.bay.terminal_buffer, [
+    { outcome: "failure" },
+    { outcome: "cancelled" },
+    { outcome: "success" },
+  ]);
   assert.equal(projected.bay.timings.sample_kind, "completed_review_journeys");
   assert.deepEqual(projected.diagnostics, {
     errors: ["telemetry_unavailable"],
@@ -126,6 +134,45 @@ test("public status projection retains every closed Bay stage count", () => {
     applying: 5,
     repairing: 6,
   });
+});
+
+test("public status retains closed workflow categories and bounded tide counters", () => {
+  const projected = publicStatusProjection({
+    pipeline: [
+      { mode: "background-review", stage: "running" },
+      { mode: "exact-review", stage: "reviewing" },
+      { mode: "hot-review", stage: "reviewing" },
+      { mode: "automerge", stage: "repairing" },
+      { mode: "apply", stage: "closing" },
+    ],
+    bay: {
+      tide_generation: 7,
+      tide_threshold: 20,
+      last_tide_at: "2026-08-15T12:00:00Z",
+      washed_at: "2026-08-15T12:01:00Z",
+      timings: { window_minutes: 60 },
+    },
+  });
+
+  assert.deepEqual(projected.pipeline, [
+    { mode: "background-review", stage: "running" },
+    { mode: "exact-review", stage: "reviewing" },
+    { mode: "hot-review", stage: "reviewing" },
+    { mode: "automerge", stage: "repairing" },
+    { mode: "apply", stage: "closing" },
+  ]);
+  assert.deepEqual(projected.bay, {
+    tide_generation: 7,
+    tide_threshold: 20,
+    last_tide_at: "2026-08-15T12:00:00.000Z",
+    washed_at: "2026-08-15T12:01:00.000Z",
+    timings: { window_minutes: 60 },
+  });
+
+  const malformed = publicStatusProjection({
+    bay: { last_tide_at: "not-a-timestamp", washed_at: "also-invalid" },
+  });
+  assert.deepEqual(malformed.bay, {});
 });
 
 test("public status projection drops malformed and unrecognized text while retaining bounded counts", () => {
@@ -177,6 +224,14 @@ test("public status filters a legacy cached body before it can be served", async
             },
           ],
           diagnostics: { errors: ["synthetic cache error"] },
+          bay: {
+            terminal_count: 3,
+            terminal_buffer: [
+              { outcome: "success", workflow_title: "synthetic cache title" },
+              { outcome: "failure", item_key: "synthetic cache item" },
+              { outcome: "cancelled", run_url: "https://example.invalid/cache" },
+            ],
+          },
         }),
       ),
     );
@@ -193,6 +248,10 @@ test("public status filters a legacy cached body before it can be served", async
     assert.equal(serialized.includes("synthetic cache failure key"), false);
     assert.equal(serialized.includes("example.invalid/cache"), false);
     assert.deepEqual(body.workers, [{ status: "queued", progress: { completed: 0, total: 1 } }]);
+    assert.deepEqual(body.bay, {
+      terminal_count: 3,
+      terminal_buffer: [{ outcome: "success" }, { outcome: "failure" }, { outcome: "cancelled" }],
+    });
     assert.deepEqual(body.diagnostics, {
       errors: ["telemetry_unavailable"],
       error_count: 1,

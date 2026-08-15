@@ -2917,6 +2917,101 @@ test("OpenClaw Bay is a public, indexable, hardened canonical route", async () =
   assert.ok(new Set(chatContext.copies.map((copy) => copy.question)).size > 1);
   assert.ok(new Set(chatContext.copies.map((copy) => copy.answer)).size > 1);
   assert.ok(chatContext.copies.every((copy) => copy.answer.includes("7m")));
+  const terminalRowsStart = body.indexOf("function terminalRows(");
+  const terminalRowsEnd = body.indexOf("function runChanged(", terminalRowsStart);
+  assert.ok(terminalRowsStart > 0 && terminalRowsEnd > terminalRowsStart);
+  const aggregateTerminalRows = new Script(
+    `${body.slice(terminalRowsStart, terminalRowsEnd)};terminalRows`,
+  ).runInNewContext({ Array, Math, Number, String });
+  const terminalRows = JSON.parse(
+    JSON.stringify(
+      aggregateTerminalRows(
+        {
+          bay: {
+            terminal_buffer: [
+              {
+                outcome: "success",
+                workflow_title: "synthetic private workflow title",
+                item_url: "https://example.invalid/private?token=synthetic",
+              },
+              { outcome: "failure" },
+              { terminal_outcome: "cancelled" },
+              { outcome: "unrecognized" },
+            ],
+            recently_washed: [{ outcome: "success" }],
+          },
+        },
+        {},
+        true,
+      ),
+    ),
+  );
+  assert.deepEqual(
+    terminalRows.map((row: { stage: string; status: string; outcome: string }) => ({
+      stage: row.stage,
+      status: row.status,
+      outcome: row.outcome,
+    })),
+    [
+      { stage: "completed", status: "success", outcome: "success" },
+      { stage: "completed", status: "success", outcome: "success" },
+      { stage: "failed", status: "failure", outcome: "failure" },
+      { stage: "cancelled", status: "cancelled", outcome: "cancelled" },
+    ],
+  );
+  assert.ok(
+    terminalRows.every(
+      (row: { repository: string; item_url: unknown; source: Record<string, unknown> }) =>
+        row.repository === "Aggregate" &&
+        row.item_url === null &&
+        Object.keys(row.source).join(",") === "outcome",
+    ),
+  );
+  assert.equal(JSON.stringify(terminalRows).includes("synthetic private workflow title"), false);
+  assert.equal(JSON.stringify(terminalRows).includes("example.invalid"), false);
+  assert.equal(
+    aggregateTerminalRows(
+      {
+        bay: {
+          terminal_count: 12,
+          terminal_buffer: [null, {}, { outcome: { nested: "failure" } }],
+          recently_washed: [{ outcome: "success" }],
+        },
+      },
+      {},
+      false,
+    ).length,
+    0,
+  );
+  const cappedTerminalRows = aggregateTerminalRows(
+    {
+      bay: {
+        terminal_buffer: [
+          ...Array.from({ length: 10 }, () => ({ outcome: "unknown" })),
+          ...Array.from({ length: 30 }, () => ({ outcome: "success" })),
+        ],
+      },
+    },
+    {},
+    false,
+  );
+  assert.equal(cappedTerminalRows.length, 24);
+  assert.ok(cappedTerminalRows.every((row: { outcome: string }) => row.outcome === "success"));
+  const tideRows = aggregateTerminalRows(
+    {
+      bay: {
+        recently_washed: Array.from({ length: 20 }, () => ({ outcome: "failure" })),
+        terminal_buffer: Array.from({ length: 5 }, () => ({ outcome: "success" })),
+      },
+    },
+    {},
+    true,
+  );
+  assert.equal(tideRows.length, 24);
+  assert.deepEqual(
+    tideRows.map((row: { outcome: string }) => row.outcome),
+    [...Array.from({ length: 20 }, () => "failure"), ...Array.from({ length: 4 }, () => "success")],
+  );
   const runChangedSource = body.match(/function runChanged\([^}]+\}/)?.[0];
   const stageForSource = body.match(/function stageFor\([^]*?return "arriving";\}/)?.[0];
   const queueProjectionStageSource = body.match(
@@ -3016,7 +3111,7 @@ test("OpenClaw Bay is a public, indexable, hardened canonical route", async () =
   );
   assert.match(body, /hasBaySchema\(live\.bay\)\?live\.bay:previewBay/);
   assert.match(body, /state\.previewSource=false/);
-  assert.match(body, /record\.outcome==="failure"\?"failed"/);
+  assert.match(body, /outcome==="failure"\?"failed"/);
   assert.match(body, /master\.classList\.add\("resting"\)/);
   assert.match(body, /fetch\("\/api\/status"/);
   assert.match(body, /exact_review_queue=live\.exact_review_queue/);

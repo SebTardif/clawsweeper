@@ -2213,7 +2213,7 @@ test("dashboard serves stale status while coalescing one background refresh", as
     value: { default: cache },
   });
   await cache.put(
-    new Request("https://clawsweeper.openclaw.ai/api/status-cache/v3/stale"),
+    new Request("https://clawsweeper.openclaw.ai/api/status-cache/v4/stale"),
     jsonResponse({
       schema_version: 1,
       generated_at: "2026-06-13T18:00:00Z",
@@ -2299,7 +2299,7 @@ test("dashboard serves stale status while coalescing one background refresh", as
     assert.equal(second.headers.get("x-clawsweeper-cache"), "stale");
     const firstStatus = await first.json();
     const secondStatus = await second.json();
-    assert.equal(firstStatus.pipeline[0].id, "stale-row");
+    assert.equal(firstStatus.pipeline[0].id, undefined);
     assert.equal(firstStatus.exact_review_queue.pending, 1);
     assert.equal(firstStatus.exact_review_queue.handoff_health.status, "stalled");
     assert.equal(secondStatus.exact_review_queue.handoff_health.status, "stalled");
@@ -2527,15 +2527,10 @@ test("dashboard reports automerge worker reliability independently of merged PR 
     assert.equal(reliability.recovered_failures, 1);
     assert.equal(reliability.unresolved_failures, 1);
     assert.deepEqual(
-      reliability.failures.map((failure: { number: number; status: string }) => [
-        failure.number,
-        failure.status,
-      ]),
-      [
-        [107692, "unresolved"],
-        [107691, "recovered"],
-      ],
+      reliability.failures.map((failure: { status: string }) => failure.status),
+      ["unresolved", "recovered"],
     );
+    assert.ok(reliability.failures.every((failure: { number?: number }) => !failure.number));
   } finally {
     globalThis.fetch = originalFetch;
     Object.defineProperty(globalThis, "caches", { configurable: true, value: originalCaches });
@@ -2635,15 +2630,12 @@ test("dashboard batches recent automerge hydration with GraphQL when authenticat
     assert.equal(searchRequests, 1);
     assert.equal(graphqlRequests, 1);
     assert.equal(restDetailRequests, 0);
-    assert.deepEqual(
-      status.recent.automerge.map((item: { number: number; merge_commit_sha: string }) => [
-        item.number,
-        item.merge_commit_sha,
-      ]),
-      [
-        [101, "abc101"],
-        [102, "abc102"],
-      ],
+    assert.equal(status.recent.automerge.length, 2);
+    assert.ok(
+      status.recent.automerge.every(
+        (item: { number?: number; merge_commit_sha?: string }) =>
+          item.number === undefined && item.merge_commit_sha === undefined,
+      ),
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -2702,12 +2694,12 @@ test("dashboard preserves repeated untargeted activity events", async () => {
       },
     );
     const status = await response.json();
-    assert.deepEqual(
-      status.recent.events
-        .filter((event: { event_type: string }) => event.event_type === "status.test")
-        .map((event: { title: string }) => event.title)
-        .sort(),
-      ["Probe one", "Probe two"],
+    assert.equal(status.recent.events.length, 2);
+    assert.ok(
+      status.recent.events.every(
+        (event: { event_type?: string; title?: string }) =>
+          event.event_type === undefined && event.title === undefined,
+      ),
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -2936,7 +2928,6 @@ test("dashboard reuses live PR CI hydration within one status snapshot", async (
       [
         {
           state: "green",
-          head_sha: "head-80609",
           total: 1,
           failing: 0,
           pending: 0,
@@ -2944,7 +2935,6 @@ test("dashboard reuses live PR CI hydration within one status snapshot", async (
         },
         {
           state: "green",
-          head_sha: "head-80609",
           total: 1,
           failing: 0,
           pending: 0,
@@ -3086,10 +3076,8 @@ test("dashboard counts active runs that are older than the latest unfiltered pag
     assert.equal(status.fleet.support_workflow_runs, 3);
     assert.equal(status.fleet.support_queued_workflow_runs, 1);
     assert.equal(status.fleet.worker_budget, 128);
-    assert.deepEqual(
-      status.pipeline.map((row: { id: number }) => row.id),
-      [2, 4, 3],
-    );
+    assert.equal(status.pipeline.length, 3);
+    assert.ok(status.pipeline.every((row: { id?: number }) => row.id === undefined));
   } finally {
     globalThis.fetch = originalFetch;
     Object.defineProperty(globalThis, "caches", { configurable: true, value: originalCaches });
@@ -3166,10 +3154,8 @@ test("dashboard surfaces stale queue ghosts as zombies without active cards", as
     assert.equal(status.operational_health.zombie_queued_runs, 1);
     assert.equal(status.operational_health.oldest_zombie_queued_minutes, 7 * 24 * 60);
     assert.equal(status.operational_health.status, "healthy");
-    assert.deepEqual(
-      status.pipeline.map((row: { id: number }) => row.id),
-      [2],
-    );
+    assert.equal(status.pipeline.length, 1);
+    assert.equal(status.pipeline[0].id, undefined);
   } finally {
     globalThis.fetch = originalFetch;
     Object.defineProperty(globalThis, "caches", { configurable: true, value: originalCaches });
@@ -3371,72 +3357,24 @@ test("dashboard exposes ClawSweeper-owned recent closes and 24h stats", async ()
       },
     );
     const status = await response.json();
-    assert.deepEqual(
-      status.recent.closed_items.map(
-        (item: { type: string; number: number; closed_by: string }) => ({
-          type: item.type,
-          number: item.number,
-          closed_by: item.closed_by,
-        }),
+    assert.equal(status.recent.closed_items.length, 3);
+    assert.ok(
+      status.recent.closed_items.every(
+        (item: { type?: string; number?: number; closed_by?: string; title?: string }) =>
+          item.type === undefined &&
+          item.number === undefined &&
+          item.closed_by === undefined &&
+          item.title === undefined,
       ),
-      [
-        { type: "Issue", number: 80, closed_by: "clawsweeper[bot]" },
-        { type: "PR", number: 81, closed_by: "clawsweeper[bot]" },
-        { type: "Issue", number: 82, closed_by: "openclaw-clawsweeper[bot]" },
-      ],
     );
-    assert.deepEqual(
-      status.recent.events.map(
-        (event: {
-          mode: string;
-          stage: string;
-          status: string;
-          item_number: number;
-          source: string;
-          title: string;
-        }) => ({
-          mode: event.mode,
-          stage: event.stage,
-          status: event.status,
-          item_number: event.item_number,
-          source: event.source,
-          title: event.title,
-        }),
+    assert.equal(status.recent.events.length, 4);
+    assert.ok(
+      status.recent.events.every(
+        (event: { item_number?: number; source?: string; title?: string }) =>
+          event.item_number === undefined &&
+          event.source === undefined &&
+          event.title === undefined,
       ),
-      [
-        {
-          mode: "close_blocked",
-          stage: "close_duplicate",
-          status: "blocked",
-          item_number: undefined,
-          source: undefined,
-          title: "Blocked close event",
-        },
-        {
-          mode: "item_closed",
-          stage: "close_fixed_by_candidate",
-          status: "executed",
-          item_number: undefined,
-          source: undefined,
-          title: "Explicit PR close event",
-        },
-        {
-          mode: "item_closed",
-          stage: "close_duplicate",
-          status: "executed",
-          item_number: undefined,
-          source: undefined,
-          title: "Real close event",
-        },
-        {
-          mode: "closed",
-          stage: "Issue",
-          status: "closed",
-          item_number: 82,
-          source: "closed_items",
-          title: "Alternate app closed issue",
-        },
-      ],
     );
     assert.deepEqual(status.recent.closed_stats, {
       window_hours: 24,
@@ -3444,14 +3382,8 @@ test("dashboard exposes ClawSweeper-owned recent closes and 24h stats", async ()
       total: 3,
       issues: 2,
       prs: 1,
-      by_repository: {
-        "openclaw/openclaw": {
-          total: 3,
-          issues: 2,
-          prs: 1,
-        },
-      },
     });
+    assert.equal(status.recent.closed_stats.by_repository, undefined);
     assert.ok(new Date(status.recent.closed_stats.since).getTime() <= Date.now());
     assert.deepEqual(issuePages, ["1"]);
   } finally {
@@ -3533,14 +3465,8 @@ test("dashboard fetches additional closed pages only when the first page is full
       total: 1,
       issues: 1,
       prs: 0,
-      by_repository: {
-        "openclaw/openclaw": {
-          total: 1,
-          issues: 1,
-          prs: 0,
-        },
-      },
     });
+    assert.equal(status.recent.closed_stats.by_repository, undefined);
   } finally {
     globalThis.fetch = originalFetch;
     Object.defineProperty(globalThis, "caches", { configurable: true, value: originalCaches });
