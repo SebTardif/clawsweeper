@@ -1366,12 +1366,257 @@ async function appendHealthHistorySample(env, sample) {
   );
 }
 
-function cachedStatusResponse(cached, cacheState) {
+const PUBLIC_STATUS_TEXT_VALUES = new Set([
+  "active",
+  "applying",
+  "arriving",
+  "all_clear",
+  "amber",
+  "applying",
+  "arriving",
+  "assist",
+  "cancelled",
+  "congested",
+  "commit-review",
+  "completed",
+  "degraded",
+  "failure",
+  "github-checks",
+  "green",
+  "healthy",
+  "in_progress",
+  "idle",
+  "issue_to_pr",
+  "job",
+  "neutral",
+  "needs_attention",
+  "other",
+  "pending",
+  "processed",
+  "publishing",
+  "pr_repair",
+  "publishing",
+  "queued",
+  "repair",
+  "repair_cluster",
+  "repairing",
+  "red",
+  "requested",
+  "reviewing",
+  "running",
+  "setting-up",
+  "skipped",
+  "skipped_changed_since_review",
+  "stale",
+  "stalled",
+  "success",
+  "telemetry_unavailable",
+  "timed_out",
+  "unavailable",
+  "unknown",
+  "waiting",
+  "workflow-fallback",
+]);
+
+const PUBLIC_STATUS_TEXT_FIELDS = new Set([
+  "conclusion",
+  "mode",
+  "outcome",
+  "sample_kind",
+  "severity",
+  "source",
+  "stage",
+  "state",
+  "status",
+  "terminal_outcome",
+  "work_kind",
+]);
+
+const PUBLIC_STATUS_TIME_FIELDS = new Set([
+  "at",
+  "completed_at",
+  "generated_at",
+  "received_at",
+  "started_at",
+  "updated_at",
+]);
+
+const PUBLIC_STATUS_BLOCKED_FIELD_PARTS = new Set([
+  "body",
+  "comment",
+  "credential",
+  "detail",
+  "error",
+  "event",
+  "failure",
+  "hash",
+  "id",
+  "item",
+  "job",
+  "key",
+  "message",
+  "name",
+  "note",
+  "number",
+  "path",
+  "ref",
+  "repo",
+  "repository",
+  "secret",
+  "sha",
+  "target",
+  "title",
+  "token",
+  "url",
+  "uri",
+  "workflow",
+]);
+
+const PUBLIC_STATUS_COUNT_FIELDS = new Set([
+  "active_codex_jobs",
+  "active",
+  "active_intake_runs",
+  "active_worker_runs",
+  "active_workflow_runs",
+  "action_records",
+  "attempts",
+  "available_slots",
+  "automerge_samples",
+  "budget_used_percent",
+  "capacity",
+  "cancelled_attempts",
+  "closed",
+  "comment_synced",
+  "completed",
+  "confirmed_proposal",
+  "count",
+  "dispatching",
+  "error_rate_percent",
+  "examined",
+  "failed_attempts",
+  "failed_recent_runs",
+  "fallbacks",
+  "guarded_retry",
+  "inconsistent_or_stale",
+  "leased",
+  "measured_attempts",
+  "pending",
+  "pending_depth",
+  "processed",
+  "promotion_cooldown_eligible",
+  "promotion_eligible",
+  "proof_required",
+  "queued_workflow_runs",
+  "recovered_failures",
+  "recovery_rate_percent",
+  "review_refresh",
+  "reviewing",
+  "running",
+  "sample_limit",
+  "sampled_runs",
+  "setting_up",
+  "samples",
+  "support_queued_workflow_runs",
+  "support_workflow_runs",
+  "stalled_after_seconds",
+  "successful_attempts",
+  "skipped",
+  "skipped_changed_since_review",
+  "tide_generation",
+  "tide_threshold",
+  "target_repository_count",
+  "total",
+  "unresolved_failures",
+  "worker_budget",
+  "worker_detail_fallbacks",
+  "worker_detail_runs",
+  "waiting",
+]);
+
+const PUBLIC_STATUS_SAFE_OBJECT_FIELDS = new Set(["comment_routers", "comment_sync"]);
+
+export function publicStatusProjection(snapshot) {
+  const sanitized = publicStatusValue(snapshot, "root", 0);
+  const document = objectValue(sanitized) || { schema_version: 1 };
+  const diagnostics = objectValue(document.diagnostics) || {};
+  const sourceDiagnostics = objectValue(snapshot?.diagnostics);
+  const sourceErrors = Array.isArray(sourceDiagnostics.errors) ? sourceDiagnostics.errors : [];
+  const retainedErrorCount = Number(sourceDiagnostics.error_count);
+  const errorCount =
+    Number.isSafeInteger(retainedErrorCount) && retainedErrorCount >= 0
+      ? retainedErrorCount
+      : sourceErrors.length;
+  document.diagnostics = {
+    ...diagnostics,
+    // Keep a bounded incomplete-telemetry signal without retaining upstream text.
+    errors: Array.from({ length: Math.min(errorCount, 20) }, () => "telemetry_unavailable"),
+    error_count: errorCount,
+  };
+  return document;
+}
+
+function publicStatusValue(value, field, depth) {
+  if (depth > 12) return undefined;
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string") return publicStatusText(value, field);
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, 100)
+      .map((entry) => publicStatusValue(entry, field, depth + 1))
+      .filter((entry) => entry !== undefined);
+  }
+  if (!value || typeof value !== "object") return undefined;
+
+  const result = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (!publicStatusFieldAllowed(key, entry)) continue;
+    const next = publicStatusValue(entry, key, depth + 1);
+    if (next !== undefined) result[key] = next;
+  }
+  return result;
+}
+
+function publicStatusFieldAllowed(field, value) {
+  if (!/^[a-z][a-z0-9_]{0,63}$/.test(field)) return false;
+  if (PUBLIC_STATUS_SAFE_OBJECT_FIELDS.has(field)) return true;
+  if (typeof value === "number") {
+    return (
+      PUBLIC_STATUS_COUNT_FIELDS.has(field) ||
+      /(?:_count|_ms|_percent|_rate_per_hour|_total)$/.test(field)
+    );
+  }
+  return !field.split("_").some((part) => PUBLIC_STATUS_BLOCKED_FIELD_PARTS.has(part));
+}
+
+function publicStatusText(value, field) {
+  const text = value.trim();
+  if (PUBLIC_STATUS_TIME_FIELDS.has(field)) {
+    const timestamp = Date.parse(text);
+    return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
+  }
+  if (!PUBLIC_STATUS_TEXT_FIELDS.has(field)) return undefined;
+  const normalized = text.toLowerCase();
+  return PUBLIC_STATUS_TEXT_VALUES.has(normalized) ? normalized : undefined;
+}
+
+async function cachedStatusResponse(cached, cacheState) {
   const headers = new Headers(cached.headers);
   headers.set("content-type", "application/json; charset=utf-8");
   headers.set("cache-control", "no-store");
   headers.set("x-clawsweeper-cache", cacheState);
-  return cors(new Response(cached.body, { status: cached.status, headers }));
+  let snapshot = null;
+  try {
+    snapshot = await cached.clone().json();
+  } catch {
+    snapshot = { schema_version: 1 };
+  }
+  return statusSnapshotResponse(
+    publicStatusProjection(snapshot),
+    cacheState,
+    cached.status,
+    headers,
+  );
 }
 
 function statusSnapshotResponse(snapshot, cacheState, status = 200, headers?) {
@@ -1380,7 +1625,10 @@ function statusSnapshotResponse(snapshot, cacheState, status = 200, headers?) {
   responseHeaders.set("cache-control", "no-store");
   responseHeaders.set("x-clawsweeper-cache", cacheState);
   return cors(
-    new Response(JSON.stringify(snapshot, null, 2), { status, headers: responseHeaders }),
+    new Response(JSON.stringify(publicStatusProjection(snapshot), null, 2), {
+      status,
+      headers: responseHeaders,
+    }),
   );
 }
 
@@ -1415,9 +1663,9 @@ async function refreshStatusCaches(request, env) {
   // Queue stats and the GitHub-backed global lease are operational observations, not
   // request-specific data. Cache the composed document so a cache hit never waits on
   // those remote probes; the existing stale-while-revalidate path refreshes them safely.
-  const snapshot = await attachExactReviewQueueStatus(baseSnapshot, env);
+  const snapshot = publicStatusProjection(await attachExactReviewQueueStatus(baseSnapshot, env));
   const body = JSON.stringify(snapshot, null, 2);
-  const hasErrors = Boolean(snapshot.diagnostics?.errors?.length);
+  const hasErrors = Number(snapshot.diagnostics?.error_count || 0) > 0;
   const looksEmpty =
     !snapshot.pipeline.length && snapshot.fleet.active_workflow_runs === 0 && hasErrors;
   if (!looksEmpty) {
@@ -1448,7 +1696,7 @@ async function refreshStatusCaches(request, env) {
 }
 
 function statusCacheRequest(request, bucket) {
-  return new Request(new URL(`/api/status-cache/v3/${bucket}`, request.url).toString(), {
+  return new Request(new URL(`/api/status-cache/v4/${bucket}`, request.url).toString(), {
     method: "GET",
   });
 }
@@ -3819,7 +4067,7 @@ async function statusSnapshot(env) {
   const ttl = numberFrom(env.CACHE_TTL_SECONDS, 20);
   const cached = await readCachedSnapshot(env, ttl);
   if (cached?.bay?.timings?.sample_kind === "completed_review_journeys") {
-    return cached;
+    return publicStatusProjection(cached);
   }
 
   const github = createGithubJsonCache(env);
@@ -4036,8 +4284,7 @@ async function statusSnapshot(env) {
     schema_version: 1,
     generated_at: generatedAt,
     source: {
-      clawsweeper_repo: repo,
-      target_repositories: targetRepos,
+      target_repository_count: targetRepos.length,
     },
     fleet: {
       worker_budget: budget,
@@ -5098,7 +5345,7 @@ async function recentWorkerHealth(
 ) {
   const cacheKey = `worker-health:v3:${String(repo || "").toLowerCase()}`;
   const cached = await readStoredJson(env, cacheKey);
-  if (cached) return cached;
+  if (cached) return workerHealthStorageProjection(cached);
 
   const completedRuns = runs
     .filter(
@@ -5180,10 +5427,31 @@ async function recentWorkerHealth(
   await writeStoredJson(
     env,
     cacheKey,
-    health,
+    workerHealthStorageProjection(health),
     numberFrom(env.WORKER_HEALTH_CACHE_TTL_SECONDS, WORKER_HEALTH_CACHE_TTL_SECONDS),
   );
   return health;
+}
+
+function workerHealthStorageProjection(health) {
+  return {
+    sampled_runs: health.sampled_runs,
+    attempts: health.attempts,
+    successful_attempts: health.successful_attempts,
+    failed_attempts: health.failed_attempts,
+    cancelled_attempts: health.cancelled_attempts,
+    recovered_failures: health.recovered_failures,
+    unresolved_failures: health.unresolved_failures,
+    error_rate_percent: health.error_rate_percent,
+    recovery_rate_percent: health.recovery_rate_percent,
+    // The per-attempt source records contain unbounded workflow metadata. Aggregate
+    // it before durable caching; live callers retain it only long enough to update
+    // the in-memory status projection for the current request.
+    recent_attempts: [],
+    failures: publicStatusValue(health.failures, "failures", 0),
+    errors: [],
+    updated_at: health.updated_at,
+  };
 }
 
 function emptyWorkerHealth(updatedAt) {

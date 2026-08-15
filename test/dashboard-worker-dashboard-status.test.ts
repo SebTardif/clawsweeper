@@ -1339,63 +1339,33 @@ test("dashboard exposes active worker jobs and their current steps", async () =>
       },
     );
     const status = await response.json();
+    const serializedStatus = JSON.stringify(status);
+    for (const privateField of [
+      "workflow_title",
+      "failure_key",
+      "run_url",
+      "job_url",
+      "repository",
+      "item_number",
+      "item_numbers",
+      "target_items",
+      "name",
+      "id",
+    ]) {
+      assert.equal(serializedStatus.includes(`"${privateField}"`), false);
+    }
+    assert.equal(status.workers[0].status, "in_progress");
+    assert.deepEqual(status.workers[0].progress, { completed: 2, total: 3 });
     assert.equal(status.fleet.active_codex_jobs, 2);
     assert.equal(status.fleet.worker_detail_runs, 3);
     assert.equal(status.fleet.worker_detail_fallbacks, 1);
     assert.equal(status.workers.length, 5);
-    assert.equal(status.workers[0].id, 4201);
-    assert.equal(status.workers[0].name, "Review shard 0 · openclaw/openclaw#92521,92522");
-    assert.equal(status.workers[0].repository, "openclaw/openclaw");
-    assert.equal(status.workers[0].item_number, null);
-    assert.deepEqual(status.workers[0].item_numbers, [92521, 92522]);
-    assert.equal(status.workers[0].current_step, "Review shard");
+    assert.equal(status.workers[0].status, "in_progress");
     assert.deepEqual(status.workers[0].progress, { completed: 2, total: 3 });
     assert.equal(status.workers[0].steps[2].status, "in_progress");
-    assert.deepEqual(status.workers[0].target_items, [
-      {
-        repository: "openclaw/openclaw",
-        number: 92521,
-        title: "Preserve terminal resize state",
-        url: "https://github.com/openclaw/openclaw/issues/92521",
-        type: "issue",
-      },
-      {
-        repository: "openclaw/openclaw",
-        number: 92522,
-        title: "Repair terminal resize state",
-        url: "https://github.com/openclaw/openclaw/pull/92522",
-        type: "pull_request",
-      },
-    ]);
-    assert.equal(status.workers[1].id, 4202);
-    assert.equal(status.workers[1].name, "Publish review artifacts");
     assert.equal(status.workers[1].is_codex_worker, false);
-    assert.equal(status.workers[1].item_number, 92521);
-    assert.equal(status.workers[1].current_step, "Publish review artifact action ledger");
-    assert.equal(status.workers[1].steps[0].name, "Apply review artifacts");
-    assert.equal(status.workers[2].id, 4203);
-    assert.equal(status.workers[2].name, "publish");
-    assert.equal(status.workers[2].is_codex_worker, false);
-    assert.equal(
-      status.workers[2].current_step,
-      "Finalize healthy members under a fenced heartbeat",
-    );
-    const cachedPublisherJobs = await cache.match(
-      new Request("https://clawsweeper.internal/store/workflow-jobs%3Aopenclaw%2Fclawsweeper%3A42"),
-    );
-    assert.equal(cachedPublisherJobs?.headers.get("cache-control"), "public, max-age=60");
-    assert.equal(status.workers[3].id, "run-43");
     assert.equal(status.workers[3].source, "workflow-fallback");
-    assert.equal(status.workers[3].current_step, "reviewing");
-    assert.equal(status.workers[3].target_items[0].title, "Queued terminal resize follow-up");
-    const queuedBatchPublisher = status.workers.find((entry) => entry.id === 4401);
-    assert.ok(queuedBatchPublisher);
-    assert.equal(queuedBatchPublisher.name, "publish");
-    assert.equal(queuedBatchPublisher.is_codex_worker, false);
-    assert.equal(queuedBatchPublisher.workflow_title, "Publish exact review batch");
-    assert.equal(queuedBatchPublisher.current_step, "Waiting for runner");
-
-    const cachedResponse = await worker.fetch(
+    const privacyCachedResponse = await worker.fetch(
       new Request("https://clawsweeper.openclaw.ai/api/status"),
       {
         CLAWSWEEPER_REPO: "openclaw/clawsweeper",
@@ -1407,8 +1377,9 @@ test("dashboard exposes active worker jobs and their current steps", async () =>
         waitUntil: () => undefined,
       },
     );
-    const cachedStatus = await cachedResponse.json();
-    assert.equal(cachedStatus.workers[0].target_items[0].title, "Preserve terminal resize state");
+    const cachedStatus = await privacyCachedResponse.json();
+    assert.equal(cachedStatus.workers[0].status, "in_progress");
+    assert.equal("workflow_title" in cachedStatus.workers[0], false);
     assert.equal(graphqlRequests, 1);
   } finally {
     globalThis.fetch = originalFetch;
@@ -1482,11 +1453,11 @@ test("dashboard keeps control-plane workflow fallbacks out of Codex capacity", a
     const status = await response.json();
     assert.equal(status.fleet.active_codex_jobs, 3);
     assert.equal(status.fleet.worker_detail_fallbacks, 3);
-    assert.deepEqual(status.workers.map((entry: { id: string }) => entry.id).sort(), [
-      "run-1",
-      "run-2",
-      "run-3",
-    ]);
+    assert.equal(status.workers.length, 3);
+    assert.equal(
+      status.workers.every((entry: Record<string, unknown>) => !("id" in entry)),
+      true,
+    );
     assert.deepEqual(status.control_plane, {
       publishers: { running: 1, waiting: 0 },
       comment_routers: { running: 0, waiting: 2 },
@@ -1698,7 +1669,7 @@ test("dashboard paginates worker jobs beyond GitHub's first page", async () => {
     );
     const status = await response.json();
     assert.equal(status.fleet.active_codex_jobs, 128);
-    assert.equal(status.workers.length, 128);
+    assert.equal(status.workers.length, 100);
     assert.deepEqual(requestedPages, [1, 2]);
   } finally {
     globalThis.fetch = originalFetch;
@@ -1820,15 +1791,10 @@ test("dashboard reports worker error and recovery rates from completed job steps
       median_ms: null,
       samples: 0,
     });
-    assert.deepEqual(
-      status.bay.terminal_buffer.map((item: { number: number }) => item.number),
-      [100, 200, 300],
-    );
+    assert.equal(status.bay.terminal_buffer.length, 3);
     assert.equal(status.health.recent_attempts, undefined);
-    assert.equal(status.health.failures[0].item_numbers[0], 200);
+    assert.equal(status.health.failures.length, 2);
     assert.equal(status.health.failures[0].recovered, false);
-    assert.equal(status.health.failures[0].failed_step, "Review shard");
-    assert.equal(status.health.failures[1].item_numbers[0], 100);
     assert.equal(status.health.failures[1].recovered, true);
     assert.equal(jobRequests, 4);
   } finally {
@@ -1905,15 +1871,15 @@ test("dashboard exposes scheduled cluster intake markers and runs", async () => 
     });
     assert.equal(response.status, 200);
     const status = await response.json();
-    assert.equal(status.recent.cluster_repair.workflow, "repair-cluster-intake.yml");
+    assert.equal(status.recent.cluster_repair.markers.length, 1);
+    assert.equal("workflow" in status.recent.cluster_repair, false);
     assert.equal("schedule" in status.recent.cluster_repair, false);
-    assert.equal(status.recent.cluster_repair.markers[0].status, "imported");
     assert.equal(status.recent.cluster_repair.markers[0].generated_count, 1);
     assert.equal(
-      status.recent.cluster_repair.markers[0].last_processed_store_short_sha,
-      "abc123def4",
+      "last_processed_store_short_sha" in status.recent.cluster_repair.markers[0],
+      false,
     );
-    assert.equal(status.recent.cluster_repair.latest_runs[0].url, marker.run_url);
+    assert.equal("url" in status.recent.cluster_repair.latest_runs[0], false);
   } finally {
     globalThis.fetch = originalFetch;
     Object.defineProperty(globalThis, "caches", { configurable: true, value: originalCaches });
@@ -2048,10 +2014,7 @@ test("dashboard exposes apply health from sweep status without broad scans", asy
     const status = await response.json();
     assert.equal(status.recent.apply_health.attention_count, 1);
     assert.equal(status.recent.apply_health.items[0].status, "needs_attention");
-    assert.equal(
-      status.recent.apply_health.items[0].run_url,
-      "https://github.com/openclaw/clawsweeper/actions/runs/98",
-    );
+    assert.equal("run_url" in status.recent.apply_health.items[0], false);
     assert.equal(status.recent.apply_health.items[0].examined, 4);
     assert.equal(status.recent.apply_health.items[0].action_records, 2);
     assert.equal(status.recent.apply_health.items[0].processed, 2);
@@ -2072,10 +2035,7 @@ test("dashboard exposes apply health from sweep status without broad scans", asy
     assert.deepEqual(status.recent.apply_health.items[0].next_action_buckets, {
       review_refresh: 2,
     });
-    assert.equal(
-      status.recent.apply_health.items[0].next_actions[0].next_step,
-      "Queue a fresh ClawSweeper review before any close retry.",
-    );
+    assert.equal("next_step" in status.recent.apply_health.items[0].next_actions[0], false);
     assert.equal(status.recent.apply_health.items[0].cycle.estimated_full_cycle_minutes, null);
     assert.equal(status.recent.apply_health.items[0].cycle.apply_ready_count, 1200);
     assert.deepEqual(status.recent.apply_health.items[0].cycle.candidate_counts, {
@@ -2172,8 +2132,8 @@ test("dashboard reads stored CI status for active PR rows", async () => {
       },
     );
     const status = await response.json();
-    assert.equal(status.pipeline[0].repository, "openclaw/openclaw");
-    assert.equal(status.pipeline[0].item_number, 80609);
+    assert.equal("repository" in status.pipeline[0], false);
+    assert.equal("item_number" in status.pipeline[0], false);
     assert.equal(status.pipeline[0].ci.state, "green");
     assert.equal(status.pipeline[0].ci.source, "github-checks");
     assert.equal(status.pipeline[0].ci.total, 12);

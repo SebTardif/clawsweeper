@@ -2935,7 +2935,7 @@ function workerTarget(worker) {
   }
   if (worker.repository && worker.item_number) return worker.repository + "#" + worker.item_number;
   if (worker.repository) return worker.repository;
-  return compactText(worker.workflow_title || worker.name);
+  return worker.mode ? modeLabel(worker.mode) + " activity" : "Worker activity";
 }
 function workerTargetTitle(worker) {
   const targets = (worker.target_items || []).filter(target => compactText(target.title));
@@ -3318,7 +3318,7 @@ function renderRecentDurablePublicationEvents(events) {
   target.innerHTML = '<div class="exact-handoff"><div class="exact-handoff-head"><div class="exact-handoff-title"><strong>Recent durable publication events</strong><span>Trailing ' + esc(events?.window?.id || "unknown") + ' window; publication attempts only.</span></div><span class="health-badge ' + esc(state) + '">' + esc(state) + '</span></div><div class="handoff-phases"><div class="handoff-phase"><span>Direct accepted</span><strong>' + esc(value(direct.accepted)) + '</strong><small>durable event</small></div><div class="handoff-phase"><span>Batch retryable</span><strong>' + esc(value(batch.retryable)) + '</strong><small>durable event</small></div></div><div class="handoff-foot"><span>No events observed is idle, not failure.</span><span>Workflow activity is not lifecycle completion.</span></div></div>';
 }
 function renderWorkers(rows) {
-  workerIndex = new Map(rows.map(worker => [String(worker.id), worker]));
+  workerIndex = new Map(rows.map((worker, index) => [String(index), worker]));
   const groups = ["issue-to-pr", "pr-repair", "review", "repair", "commit", "assist", "other"];
   const counts = Object.fromEntries(groups.map(group => [group, rows.filter(worker => workerGroup(worker) === group).length]));
   const filters = [["all", "All", rows.length], ...groups.filter(group => counts[group]).map(group => [group, group[0].toUpperCase() + group.slice(1), counts[group]])];
@@ -3333,15 +3333,16 @@ function renderWorkers(rows) {
     return;
   }
   document.getElementById("workers").innerHTML = '<div class="worker-list">' + visible.map(worker => {
+    const viewKey = rows.indexOf(worker);
     const progress = worker.progress?.total ? Math.round((worker.progress.completed / worker.progress.total) * 100) : 0;
     const kind = workerKindLabel(worker.work_kind);
     const targetTitle = workerTargetTitle(worker);
-    return '<button type="button" class="worker-row" data-worker-id="' + esc(worker.id) + '" aria-label="Open details for ' + esc(targetTitle || worker.name) + '">' +
+    return '<button type="button" class="worker-row" data-worker-id="' + viewKey + '" aria-label="Open worker details">' +
       '<div class="worker-row-main">' +
       '<i class="status-dot ' + workerStatusClass(worker.status) + '"></i>' +
       '<span class="pill">' + esc(modeLabel(worker.mode)) + (kind ? " · " + esc(kind) : "") + '</span>' +
-      '<strong class="worker-name" title="' + esc(worker.name) + '">' + esc(worker.name) + '</strong>' +
-      '<span class="worker-step">' + esc(worker.current_step || worker.stage) + '</span>' +
+      '<strong class="worker-name">Active worker</strong>' +
+      '<span class="worker-step">' + esc(worker.stage || "Status telemetry") + '</span>' +
       '<span class="worker-time mono">' + elapsed(worker.elapsed_ms) + '</span>' +
       '</div>' +
       '<div class="worker-row-sub">' +
@@ -3353,7 +3354,7 @@ function renderWorkers(rows) {
   }).join("") + '</div>';
 }
 function renderAutomaticWork(rows) {
-  automaticIndex = new Map(rows.map(row => [String(row.id), row]));
+  automaticIndex = new Map(rows.map((row, index) => [String(index), row]));
   const active = rows.filter(row => row.active || ["queued", "running", "in_progress"].includes(row.status)).length;
   document.getElementById("automatic-summary").textContent =
     fmt.format(rows.length) + " recent · " + fmt.format(active) + " active";
@@ -3364,28 +3365,28 @@ function renderAutomaticWork(rows) {
   }
   document.getElementById("automatic-work").innerHTML =
     '<div class="worker-list">' +
-    rows.map(row => {
+    rows.map((row, index) => {
       const phase = compactText(row.phase || row.status || "queued").replaceAll("_", " ");
-      return '<button type="button" class="worker-row automatic-row" data-automatic-id="' + esc(row.id) +
-        '" aria-label="Open automatic build details for ' + esc(row.title) + '">' +
+      return '<button type="button" class="worker-row automatic-row" data-automatic-id="' + index +
+        '" aria-label="Open automatic build details">' +
         '<div class="worker-row-main">' +
         '<i class="status-dot ' + workerStatusClass(row.status) + '"></i>' +
         '<span class="pill">' + esc(phase) + '</span>' +
-        '<strong class="worker-name">' + esc(row.title || "Issue #" + row.issue_number) + '</strong>' +
+        '<strong class="worker-name">Automatic work</strong>' +
         '<span class="worker-time mono">' + esc(row.updated_at ? since(row.updated_at) : "") + '</span>' +
         '</div>' +
         '<div class="worker-row-sub">' +
-        '<span class="worker-target-ref mono">' + esc(row.repository + "#" + row.issue_number) + '</span>' +
+        '<span class="worker-target-ref mono">Identity-safe status</span>' +
         '<span class="worker-target-title">' + esc(row.pr_url ? "PR opened" : row.active ? "worker active" : row.status) + '</span>' +
         '</div>' +
         '</button>';
     }).join("") +
     '</div>';
 }
-function renderWorkerDialog(worker) {
+function renderWorkerDialog(worker, viewKey) {
   const dialog = document.getElementById("worker-dialog");
   const statusClass = workerStatusClass(worker.status);
-  document.getElementById("worker-dialog-heading").innerHTML = '<div><span class="pill"><i class="status-dot ' + statusClass + '"></i>' + esc(worker.status) + '</span> <span class="pill">' + esc(modeLabel(worker.mode)) + '</span></div><h3 id="worker-dialog-title">' + esc(worker.name) + '</h3><div class="muted">' + esc(compactText(worker.workflow_title)) + '</div>';
+  document.getElementById("worker-dialog-heading").innerHTML = '<div><span class="pill"><i class="status-dot ' + statusClass + '"></i>' + esc(worker.status) + '</span> <span class="pill">' + esc(modeLabel(worker.mode)) + '</span></div><h3 id="worker-dialog-title">Active worker</h3><div class="muted">Identity-safe live status</div>';
   const targetItems = new Map((worker.target_items || []).map(target => [Number(target.number), target]));
   const targetUrls = worker.repository
     ? (worker.item_numbers || (worker.item_number ? [worker.item_number] : [])).map(number => ({
@@ -3393,10 +3394,10 @@ function renderWorkerDialog(worker) {
         label: "#" + number + (targetItems.get(Number(number))?.title ? " · " + compactText(targetItems.get(Number(number)).title) : "")
       }))
     : [];
-  const stepRows = (worker.steps || []).map(step => '<li class="step-row ' + esc(step.status) + '"><i class="step-mark"></i><strong>' + esc(step.name) + '</strong><span>' + esc(step.conclusion || step.status) + '</span></li>').join("");
+  const stepRows = (worker.steps || []).map(step => '<li class="step-row ' + esc(step.status) + '"><i class="step-mark"></i><strong>Step</strong><span>' + esc(step.conclusion || step.status) + '</span></li>').join("");
   document.getElementById("worker-dialog-body").innerHTML =
     '<div class="drawer-grid">' +
-      '<div class="drawer-stat"><span>Current step</span><strong>' + esc(worker.current_step || worker.stage) + '</strong></div>' +
+      '<div class="drawer-stat"><span>Current stage</span><strong>' + esc(worker.stage || "Status telemetry") + '</strong></div>' +
       '<div class="drawer-stat"><span>Elapsed</span><strong>' + elapsed(worker.elapsed_ms) + '</strong></div>' +
       '<div class="drawer-stat"><span>Target</span><strong>' + esc(workerTarget(worker)) + '</strong></div>' +
       '<div class="drawer-stat"><span>Progress</span><strong>' + fmt.format(worker.progress?.completed || 0) + " / " + fmt.format(worker.progress?.total || 0) + ' steps</strong></div>' +
@@ -3409,16 +3410,16 @@ function renderWorkerDialog(worker) {
     '<h2>Step Timeline</h2>' +
     (stepRows ? '<ol class="step-list">' + stepRows + '</ol>' : '<div class="empty">Job-level steps are unavailable; showing workflow fallback telemetry.</div>');
   if (!dialog.open) dialog.showModal();
-  history.replaceState(null, "", "#worker-" + encodeURIComponent(worker.id));
+  history.replaceState(null, "", "#worker-" + encodeURIComponent(viewKey));
 }
-function renderAutomaticDialog(row) {
+function renderAutomaticDialog(row, viewKey) {
   const dialog = document.getElementById("worker-dialog");
   const phase = compactText(row.phase || row.status || "queued").replaceAll("_", " ");
   document.getElementById("worker-dialog-heading").innerHTML =
     '<div><span class="pill"><i class="status-dot ' + workerStatusClass(row.status) + '"></i>' +
     esc(row.status) + '</span> <span class="pill">Automatic issue build</span></div>' +
-    '<h3 id="worker-dialog-title">' + esc(row.title) + '</h3>' +
-    '<div class="muted">' + esc(row.repository + "#" + row.issue_number) + '</div>';
+    '<h3 id="worker-dialog-title">Automatic work</h3>' +
+    '<div class="muted">Identity-safe status</div>';
   const timeline = (row.timeline || []).map(entry =>
     '<li class="step-row ' + esc(entry.status) + '"><i class="step-mark"></i><strong>' +
     esc(compactText(entry.phase).replaceAll("_", " ")) + '</strong><span>' +
@@ -3430,7 +3431,7 @@ function renderAutomaticDialog(row) {
     '<div class="drawer-grid">' +
       '<div class="drawer-stat"><span>Current phase</span><strong>' + esc(phase) + '</strong></div>' +
       '<div class="drawer-stat"><span>Status</span><strong>' + esc(row.status) + '</strong></div>' +
-      '<div class="drawer-stat"><span>Source</span><strong>' + esc(row.repository + "#" + row.issue_number) + '</strong></div>' +
+      '<div class="drawer-stat"><span>Source</span><strong>Identity-safe status</strong></div>' +
       '<div class="drawer-stat"><span>Updated</span><strong>' + esc(row.updated_at ? since(row.updated_at) : "unknown") + '</strong></div>' +
     '</div>' +
     '<div class="drawer-links">' +
@@ -3442,7 +3443,7 @@ function renderAutomaticDialog(row) {
     '<h2>Lifecycle Timeline</h2>' +
     (timeline ? '<ol class="step-list">' + timeline + '</ol>' : '<div class="empty">No lifecycle events recorded yet.</div>');
   if (!dialog.open) dialog.showModal();
-  history.replaceState(null, "", "#automatic-" + encodeURIComponent(row.id));
+  history.replaceState(null, "", "#automatic-" + encodeURIComponent(viewKey));
 }
 function closeWorkerDialog() {
   const dialog = document.getElementById("worker-dialog");
@@ -3454,11 +3455,11 @@ function closeWorkerDialog() {
 function openWorkerFromHash() {
   if (location.hash.startsWith("#worker-")) {
     const worker = workerIndex.get(decodeURIComponent(location.hash.slice(8)));
-    if (worker) renderWorkerDialog(worker);
+    if (worker) renderWorkerDialog(worker, decodeURIComponent(location.hash.slice(8)));
     else if (document.getElementById("worker-dialog").open) closeWorkerDialog();
   } else if (location.hash.startsWith("#automatic-")) {
     const row = automaticIndex.get(decodeURIComponent(location.hash.slice(11)));
-    if (row) renderAutomaticDialog(row);
+    if (row) renderAutomaticDialog(row, decodeURIComponent(location.hash.slice(11)));
     else if (document.getElementById("worker-dialog").open) closeWorkerDialog();
   }
 }
@@ -3528,13 +3529,13 @@ function renderDashboard(data, note) {
   const severity = serverHealth?.severity ||
     (handoffStatus === "stalled" || operationalStatus === "stalled" ? "red" : needsAttention ? "amber" : "green");
   const workerCount = (data.workers || []).filter(worker => worker.is_codex_worker !== false).length;
-  const repoCount = (data.source.target_repositories || []).length;
+  const repoCount = Number(data.source?.target_repository_count || 0);
   document.getElementById("hero-dot").className = "hero-dot " + (severity === "green" ? "ok" : severity);
   document.getElementById("hero-headline").textContent =
     (needsAttention ? "Needs attention" : "All clear") + " — " +
     fmt.format(workerCount) + " claw worker" + (workerCount === 1 ? "" : "s") + " sweeping " +
     fmt.format(repoCount) + " " + (repoCount === 1 ? "repository" : "repositories");
-  document.getElementById("subtitle").textContent = data.source.target_repositories.join(", ");
+  document.getElementById("subtitle").textContent = "Identity-safe public status";
   document.getElementById("updated").textContent = "Updated " + since(data.generated_at) + (note ? " \u00b7 " + note : "");
   const fleet = data.fleet;
   document.getElementById("metrics").innerHTML = [
@@ -4074,13 +4075,13 @@ document.getElementById("workers").addEventListener("click", event => {
   const button = event.target.closest("button[data-worker-id]");
   if (!button) return;
   const worker = workerIndex.get(String(button.dataset.workerId));
-  if (worker) renderWorkerDialog(worker);
+  if (worker) renderWorkerDialog(worker, String(button.dataset.workerId));
 });
 document.getElementById("automatic-work").addEventListener("click", event => {
   const button = event.target.closest("button[data-automatic-id]");
   if (!button) return;
   const row = automaticIndex.get(String(button.dataset.automaticId));
-  if (row) renderAutomaticDialog(row);
+  if (row) renderAutomaticDialog(row, String(button.dataset.automaticId));
 });
 document.addEventListener("click", event => {
   const button = event.target.closest("button[data-copy-command]");
@@ -4102,7 +4103,7 @@ document.getElementById("worker-dialog").addEventListener("click", event => {
   const linkedWorker = event.target.closest("button[data-linked-worker-id]");
   if (linkedWorker) {
     const worker = workerIndex.get(String(linkedWorker.dataset.linkedWorkerId));
-    if (worker) renderWorkerDialog(worker);
+    if (worker) renderWorkerDialog(worker, String(linkedWorker.dataset.linkedWorkerId));
     return;
   }
   if (event.target === event.currentTarget) closeWorkerDialog();
