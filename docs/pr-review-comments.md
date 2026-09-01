@@ -254,6 +254,11 @@ scripts to execute. Supplemental excerpts and PR patches are reviewer-only
 media inputs: neither enters automatic media downloads. Primary body and
 comment media remain discoverable, even when the same URL appears in a patch.
 
+Each selected media item has a two-minute preparation deadline shared by its
+download, video probe, and contact-sheet conversion. A timed-out subprocess is
+killed and recorded as a failed artifact; later items still run. Downloads also
+retain curl's 90-second limit.
+
 Assist preserves coverage alongside the body. The report context ledger counts
 each primary record as one entry and includes its coverage in character totals;
 its list hydration counters do not describe body completeness. Related items,

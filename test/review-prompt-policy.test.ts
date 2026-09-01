@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import test from "node:test";
 
 import {
@@ -15,6 +16,7 @@ import {
   renderReviewCommentFromReport,
   reviewPromptForTest,
 } from "../dist/clawsweeper.js";
+import { mediaProofCommandRunner } from "../dist/clawsweeper-media-proof.js";
 import { LIVE_VERIFICATION_MARKER } from "../dist/clawsweeper-policy.js";
 import type { LiveProofPlan } from "../dist/clawsweeper-types.js";
 import {
@@ -533,6 +535,76 @@ test("media proof preparation surfaces a failed screenshot download as a failed 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("media proof shares each video's deadline across the maximum selected URLs", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "clawsweeper-media-proof-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  const timeouts: number[] = [];
+  const prepared = prepareMediaProofArtifactsForTest(
+    {
+      issue: {},
+      comments: [{ body: [1, 2, 3, 4, 5].map((n) => `https://example.com/${n}.mov`).join("\n") }],
+      timeline: [],
+    },
+    dir,
+    (command, _args, options) => {
+      timeouts.push(options?.timeoutMs ?? 0);
+      now += command === "curl" ? 80_000 : command === "ffprobe" ? 30_000 : 10_000;
+      return { status: 0, stdout: "{}" };
+    },
+  );
+  assert.deepEqual(
+    timeouts,
+    [1, 2, 3, 4].flatMap(() => [120_000, 40_000, 10_000]),
+  );
+  assert.equal(now, 480_000);
+  assert.equal(prepared.artifacts.length, 4);
+  assert.ok(prepared.artifacts.every((artifact) => artifact.status === "prepared"));
+});
+
+for (const exhaustedAfter of ["curl", "ffprobe"]) {
+  test(`media proof stops after ${exhaustedAfter} exhausts the deadline and continues later items`, (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "clawsweeper-media-proof-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    let now = 0;
+    let item = 0;
+    t.mock.method(performance, "now", () => now);
+    const calls: string[][] = [[], []];
+    const prepared = prepareMediaProofArtifactsForTest(
+      {
+        issue: {},
+        comments: [{ body: "https://example.com/1.mov\nhttps://example.com/2.mov" }],
+        timeline: [],
+      },
+      dir,
+      (command) => {
+        if (command === "curl") item += 1;
+        calls[item - 1]?.push(command);
+        if (item === 1 && command === exhaustedAfter) now += 120_000;
+        return { status: 0, stdout: "{}" };
+      },
+    );
+    assert.deepEqual(calls, [
+      exhaustedAfter === "curl" ? ["curl"] : ["curl", "ffprobe"],
+      ["curl", "ffprobe", "ffmpeg"],
+    ]);
+    assert.equal(prepared.artifacts[0]?.status, "failed");
+    assert.match(prepared.artifacts[0]?.detail ?? "", /deadline exceeded/);
+    assert.equal(prepared.artifacts[1]?.status, "prepared");
+  });
+}
+
+test("media proof runner kills a timed-out child even when it ignores SIGTERM", () => {
+  const result = mediaProofCommandRunner(
+    process.execPath,
+    ["-e", 'process.on("SIGTERM", () => {}); setTimeout(() => process.exit(0), 2000);'],
+    { timeoutMs: 250 },
+  );
+  assert.equal((result.error as NodeJS.ErrnoException)?.code, "ETIMEDOUT");
+  assert.equal(result.signal, "SIGKILL");
 });
 
 test("runtime prompt tells Codex to inspect local media artifacts before browser fallback", () => {

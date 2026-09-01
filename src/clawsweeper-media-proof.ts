@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { trimMiddle } from "./clawsweeper-text.js";
 import type {
   ItemContext,
@@ -15,6 +16,7 @@ const MEDIA_PROOF_EXTENSIONS = new Set([...IMAGE_PROOF_EXTENSIONS, ...VIDEO_PROO
 const MEDIA_PROOF_MANIFEST_FILE = "media-proof-manifest.json";
 const MEDIA_PROOF_SUMMARY_FILE = "media-proof-summary.md";
 const MAX_MEDIA_PROOF_URLS = 4;
+const MEDIA_PROOF_TIMEOUT_MS = 120_000;
 
 export function mediaProofCommandRunner(
   command: string,
@@ -27,6 +29,7 @@ export function mediaProofCommandRunner(
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
     timeout: options.timeoutMs,
+    killSignal: "SIGKILL",
   });
 }
 
@@ -142,6 +145,15 @@ export function prepareMediaProofArtifacts(
   mkdirSync(proofScratchDir, { recursive: true });
   const artifacts: PreparedMediaProofArtifact[] = [];
   for (const [index, url] of urls.entries()) {
+    const deadlineAt = performance.now() + MEDIA_PROOF_TIMEOUT_MS;
+    const runBeforeDeadline: MediaProofCommandRunner = (command, args) => {
+      const timeoutMs = Math.ceil(deadlineAt - performance.now());
+      // A zero spawn timeout disables the deadline, so do not start another stage.
+      if (timeoutMs <= 0) {
+        return { status: null, error: new Error("media proof deadline exceeded") };
+      }
+      return runner(command, args, { timeoutMs });
+    };
     const ordinal = index + 1;
     const kind = mediaProofKind(url);
     const downloadedPath = join(
@@ -150,7 +162,7 @@ export function prepareMediaProofArtifacts(
     );
     const metadataPath = join(proofScratchDir, `proof-video-${ordinal}.ffprobe.json`);
     const contactSheetPath = join(proofScratchDir, `proof-video-${ordinal}.contact-sheet.jpg`);
-    const download = runner("curl", [
+    const download = runBeforeDeadline("curl", [
       "-L",
       "--fail",
       "--silent",
@@ -185,7 +197,7 @@ export function prepareMediaProofArtifacts(
       });
       continue;
     }
-    const metadata = ffprobeMedia(downloadedPath, runner);
+    const metadata = ffprobeMedia(downloadedPath, runBeforeDeadline);
     if (metadata.status !== 0) {
       artifacts.push({
         kind,
@@ -199,7 +211,11 @@ export function prepareMediaProofArtifacts(
       continue;
     }
     writeFileSync(metadataPath, String(metadata.stdout ?? "{}"), "utf8");
-    const contactSheet = createVideoContactSheet(downloadedPath, contactSheetPath, runner);
+    const contactSheet = createVideoContactSheet(
+      downloadedPath,
+      contactSheetPath,
+      runBeforeDeadline,
+    );
     if (contactSheet.status !== 0) {
       artifacts.push({
         kind,
