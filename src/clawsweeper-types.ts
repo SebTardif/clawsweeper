@@ -1249,6 +1249,7 @@ export type MediaProofCommandRunner = (
     cwd?: string;
     env?: NodeJS.ProcessEnv;
     timeoutMs?: number;
+    killSignal?: NodeJS.Signals;
   },
 ) => {
   status: number | null;

@@ -21,7 +21,7 @@ const MEDIA_PROOF_TIMEOUT_MS = 120_000;
 export function mediaProofCommandRunner(
   command: string,
   args: readonly string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
+  options: Parameters<MediaProofCommandRunner>[2] = {},
 ) {
   return spawnSync(command, [...args], {
     cwd: options.cwd,
@@ -29,7 +29,7 @@ export function mediaProofCommandRunner(
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
     timeout: options.timeoutMs,
-    killSignal: "SIGKILL",
+    killSignal: options.killSignal,
   });
 }
 
@@ -152,7 +152,7 @@ export function prepareMediaProofArtifacts(
       if (timeoutMs <= 0) {
         return { status: null, error: new Error("media proof deadline exceeded") };
       }
-      return runner(command, args, { timeoutMs });
+      return runner(command, args, { timeoutMs, killSignal: "SIGKILL" });
     };
     const ordinal = index + 1;
     const kind = mediaProofKind(url);

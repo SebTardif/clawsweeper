@@ -597,14 +597,46 @@ for (const exhaustedAfter of ["curl", "ffprobe"]) {
   });
 }
 
-test("media proof runner kills a timed-out child even when it ignores SIGTERM", () => {
+test("media proof runner preserves default termination for unrelated callers", () => {
   const result = mediaProofCommandRunner(
     process.execPath,
-    ["-e", 'process.on("SIGTERM", () => {}); setTimeout(() => process.exit(0), 2000);'],
+    ["-e", "setTimeout(() => process.exit(0), 2000);"],
     { timeoutMs: 250 },
   );
   assert.equal((result.error as NodeJS.ErrnoException)?.code, "ETIMEDOUT");
-  assert.equal(result.signal, "SIGKILL");
+  assert.equal(result.signal, "SIGTERM");
+});
+
+test("media preparation kills a timed-out probe even when it ignores SIGTERM", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "clawsweeper-media-proof-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  const prepared = prepareMediaProofArtifactsForTest(
+    {
+      issue: {},
+      comments: [{ body: "https://example.com/1.mov" }],
+      timeline: [],
+    },
+    dir,
+    (command, _args, options) => {
+      if (command === "curl") {
+        now = 119_750;
+        return { status: 0 };
+      }
+      assert.equal(command, "ffprobe");
+      const result = mediaProofCommandRunner(
+        process.execPath,
+        ["-e", 'process.on("SIGTERM", () => {}); setTimeout(() => process.exit(0), 2000);'],
+        options,
+      );
+      assert.equal((result.error as NodeJS.ErrnoException)?.code, "ETIMEDOUT");
+      assert.equal(result.signal, "SIGKILL");
+      return result;
+    },
+  );
+  assert.equal(prepared.artifacts[0]?.status, "failed");
+  assert.match(prepared.artifacts[0]?.detail ?? "", /ffprobe failed: .*ETIMEDOUT/);
 });
 
 test("runtime prompt tells Codex to inspect local media artifacts before browser fallback", () => {
