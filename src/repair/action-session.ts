@@ -54,6 +54,8 @@ export function actionRunUrl(env: NodeJS.ProcessEnv = process.env): string {
   return repository && runId ? `${server}/${repository}/actions/runs/${runId}` : "";
 }
 
+export const ACTION_SESSION_FETCH_TIMEOUT_MS = 15_000;
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const command = args._[0];
@@ -75,7 +77,7 @@ async function main(): Promise<void> {
   );
 }
 
-async function registerActionSession(jobPath: string): Promise<void> {
+export async function registerActionSession(jobPath: string): Promise<void> {
   if (!jobPath) throw new Error("action-session register requires a job path");
   const serviceToken = requiredEnv("CLAWSWEEPER_CRABFLEET_SERVICE_TOKEN");
   const baseUrl = String(
@@ -89,6 +91,7 @@ async function registerActionSession(jobPath: string): Promise<void> {
       authorization: `Bearer ${serviceToken}`,
       "content-type": "application/json",
     },
+    signal: AbortSignal.timeout(ACTION_SESSION_FETCH_TIMEOUT_MS),
     body: JSON.stringify({
       workKey: actionWorkKey(job.frontmatter),
       workKind: actionWorkKind(job.frontmatter),
@@ -156,7 +159,7 @@ async function registerActionSession(jobPath: string): Promise<void> {
   console.log(`CrabFleet action session: ${browserUrl}`);
 }
 
-async function updateActionSession({
+export async function updateActionSession({
   state,
   phase,
   summary,
@@ -175,6 +178,7 @@ async function updateActionSession({
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
     },
+    signal: AbortSignal.timeout(ACTION_SESSION_FETCH_TIMEOUT_MS),
     body: JSON.stringify({
       state,
       phase,

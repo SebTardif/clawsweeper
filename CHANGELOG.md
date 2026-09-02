@@ -79,6 +79,7 @@ checkpoint, and status-only commits are intentionally omitted.
 - Retain numeric queue failure source locations inside the Durable Object before remote transport discards the original stack, without logging private error text.
 - Bound shared repair GitHub CLI calls with native process deadlines and honor per-call timeout settings. Thanks @SebTardif.
 - Bound standalone webhook GitHub requests to 15 seconds, including response bodies, so stalled calls return a retryable response. Thanks @SebTardif.
+- Bound CrabFleet action-session register and work-state update fetches to 15 seconds so a hung CrabFleet host cannot stall a GitHub Actions repair job. Thanks @SebTardif.
 - Kept leading report metadata authoritative through ordinary and fenced body quotes across review, repair intake, workflow selection, and decision packets; shared structural parsing rejects competing records and duplicate packet keys while preserving legacy promotion guards. Thanks @dwin-gharibi for the original report and proposed fix in [#1137](https://github.com/openclaw/clawsweeper/pull/1137).
 
 - Completed obsolete exact-review publications when apply verifies a strictly newer durable review for the same revision, preserving retry behavior for unproven results. Thanks @vincentkoc. (#1249)
