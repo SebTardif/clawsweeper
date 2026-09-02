@@ -12,6 +12,7 @@ import { parseArgs, parseJob, repoRoot } from "./lib.js";
 
 const PROGRESS_START = "<!-- clawsweeper-issue-implementation-progress:start -->";
 const PROGRESS_END = "<!-- clawsweeper-issue-implementation-progress:end -->";
+export const ISSUE_STATUS_INGEST_TIMEOUT_MS = 15_000;
 
 type StatusOptions = {
   repo: string;
@@ -195,7 +196,7 @@ export function renderIssueImplementationStatusComment(
   return `${existing}\n\n${progress}`;
 }
 
-async function postDashboardStatus(options: StatusOptions) {
+export async function postDashboardStatus(options: StatusOptions) {
   const token = String(process.env.CLAWSWEEPER_STATUS_INGEST_TOKEN ?? "").trim();
   if (!token) return "skipped";
   const url =
@@ -208,6 +209,7 @@ async function postDashboardStatus(options: StatusOptions) {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
+    signal: AbortSignal.timeout(ISSUE_STATUS_INGEST_TIMEOUT_MS),
     body: JSON.stringify({
       event_type: eventTypeForState(state),
       mode: "automatic-issue-to-pr",
