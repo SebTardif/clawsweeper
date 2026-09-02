@@ -15,6 +15,8 @@ import {
   graphqlNodesToleratingNotFound,
   normalizeModelResults,
   normalizeSpamComment,
+  OPENAI_SPAM_SCAN_ERROR_TEXT_LIMIT,
+  openAiSpamScanRequestInit,
   prioritizeSpamScanComments,
   renderSpamAuditRecord,
   shouldSendToCheapModel,
@@ -283,16 +285,14 @@ async function scanWithModel(comments: SpamScanComment[], scanModel: string) {
       },
     },
   };
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  const response = await fetch(
+    "https://api.openai.com/v1/responses",
+    openAiSpamScanRequestInit(apiKey, payload),
+  );
   if (!response.ok) {
-    throw new Error(`OpenAI spam scan failed: HTTP ${response.status} ${await response.text()}`);
+    throw new Error(
+      `OpenAI spam scan failed: HTTP ${response.status} ${compactText(await response.text(), OPENAI_SPAM_SCAN_ERROR_TEXT_LIMIT)}`,
+    );
   }
   const data = (await response.json()) as LooseRecord;
   const text = outputText(data);

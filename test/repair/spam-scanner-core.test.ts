@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import http from "node:http";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   buildSpamModelInput,
   commentVersionKey,
@@ -8,6 +11,9 @@ import {
   isProtectedSpamAuthor,
   legitimateTechnicalContextSignals,
   normalizeModelResults,
+  OPENAI_SPAM_SCAN_ERROR_TEXT_LIMIT,
+  OPENAI_SPAM_SCAN_TIMEOUT_MS,
+  openAiSpamScanRequestInit,
   prioritizeSpamScanComments,
   shouldSendToCheapModel,
   SPAM_MODEL_SYSTEM_PROMPT,
@@ -262,4 +268,72 @@ test("graphql nodes fail when the payload carries no data", () => {
     /no data payload/,
   );
   assert.throws(() => graphqlNodesToleratingNotFound(null), /no data payload/);
+});
+
+test("OpenAI spam scan request uses a named 15-30s abort deadline", () => {
+  const previousTimeout = AbortSignal.timeout;
+  let seenMs: number | undefined;
+  AbortSignal.timeout = ((milliseconds: number) => {
+    seenMs = milliseconds;
+    return previousTimeout(milliseconds);
+  }) as typeof AbortSignal.timeout;
+  try {
+    const init = openAiSpamScanRequestInit("sk-test", { model: "internal" });
+    assert.ok(OPENAI_SPAM_SCAN_TIMEOUT_MS >= 15_000);
+    assert.ok(OPENAI_SPAM_SCAN_TIMEOUT_MS <= 30_000);
+    assert.equal(seenMs, OPENAI_SPAM_SCAN_TIMEOUT_MS);
+    assert.equal(init.method, "POST");
+    assert.ok(init.signal);
+    assert.equal(init.headers && "authorization" in init.headers, true);
+  } finally {
+    AbortSignal.timeout = previousTimeout;
+  }
+});
+
+test("OpenAI spam scan deadline aborts a hung HTTP response", async (t) => {
+  const previousTimeout = AbortSignal.timeout;
+  AbortSignal.timeout = ((milliseconds: number) => {
+    assert.equal(milliseconds, OPENAI_SPAM_SCAN_TIMEOUT_MS);
+    return previousTimeout(50);
+  }) as typeof AbortSignal.timeout;
+  t.after(() => {
+    AbortSignal.timeout = previousTimeout;
+  });
+
+  const server = http.createServer(() => {});
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(
+    () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  );
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+
+  await assert.rejects(
+    fetch(
+      `http://127.0.0.1:${address.port}/v1/responses`,
+      openAiSpamScanRequestInit("sk-test", {}),
+    ),
+    (error: unknown) =>
+      error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"),
+  );
+});
+
+test("compiled spam scanner fetch uses the named OpenAI abort deadline", () => {
+  const scanner = readFileSync(
+    fileURLToPath(new URL("../../dist/repair/spam-scanner.js", import.meta.url)),
+    "utf8",
+  );
+  assert.match(scanner, /openAiSpamScanRequestInit\(/);
+  assert.match(
+    scanner,
+    /compactText\(await response\.text\(\), OPENAI_SPAM_SCAN_ERROR_TEXT_LIMIT\)/,
+  );
+  assert.ok(OPENAI_SPAM_SCAN_ERROR_TEXT_LIMIT > 0);
+  assert.ok(OPENAI_SPAM_SCAN_ERROR_TEXT_LIMIT <= 500);
 });
