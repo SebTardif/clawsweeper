@@ -15,8 +15,6 @@ import {
   graphqlNodesToleratingNotFound,
   normalizeModelResults,
   normalizeSpamComment,
-  OPENAI_SPAM_SCAN_ERROR_TEXT_LIMIT,
-  openAiSpamScanRequestInit,
   prioritizeSpamScanComments,
   renderSpamAuditRecord,
   shouldSendToCheapModel,
@@ -27,6 +25,8 @@ import {
 } from "./spam-scanner-core.js";
 import { internalCodexModel, PUBLIC_CODEX_MODEL } from "../codex-env.js";
 import { compactText } from "./text-utils.js";
+
+const OPENAI_SPAM_SCAN_TIMEOUT_MS = 120_000;
 
 const args = parseArgs(process.argv.slice(2));
 const targetRepo = stringSetting(
@@ -285,14 +285,17 @@ async function scanWithModel(comments: SpamScanComment[], scanModel: string) {
       },
     },
   };
-  const response = await fetch(
-    "https://api.openai.com/v1/responses",
-    openAiSpamScanRequestInit(apiKey, payload),
-  );
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(OPENAI_SPAM_SCAN_TIMEOUT_MS),
+  });
   if (!response.ok) {
-    throw new Error(
-      `OpenAI spam scan failed: HTTP ${response.status} ${compactText(await response.text(), OPENAI_SPAM_SCAN_ERROR_TEXT_LIMIT)}`,
-    );
+    throw new Error(`OpenAI spam scan failed: HTTP ${response.status} ${await response.text()}`);
   }
   const data = (await response.json()) as LooseRecord;
   const text = outputText(data);

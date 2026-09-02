@@ -35,21 +35,6 @@ export const SPAM_MODEL_SYSTEM_PROMPT = [
   "Use high spam only for clear solicitation, scams, unrelated promotion, credential phishing, abuse, or already-minimized spam/abuse.",
 ].join(" ");
 
-export const OPENAI_SPAM_SCAN_TIMEOUT_MS = 30_000;
-export const OPENAI_SPAM_SCAN_ERROR_TEXT_LIMIT = 500;
-
-export function openAiSpamScanRequestInit(apiKey: string, payload: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(OPENAI_SPAM_SCAN_TIMEOUT_MS),
-  };
-}
-
 const PROTECTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"]);
 const SOLICITATION_PATTERNS = [
   /\bweb scraping\b/i,
